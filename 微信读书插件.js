@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         WeRead Catalog Pages + Top Progress
 // @namespace    mailto:olv@foxmail.com
-// @version      0.6.6
+// @version      0.6.7
 // @description  Show chapter page numbers in WeRead catalog and add top reading progress.
 // @author       olv
 // @match        https://weread.qq.com/web/reader/*
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        GM_addStyle
 // @grant        unsafeWindow
 // ==/UserScript==
@@ -17,9 +17,11 @@
     const DEFAULT_WORDS_PER_PAGE = 10000;
     const MIN_WORDS_PER_PAGE = 600;
     const MAX_WORDS_PER_PAGE = 20000;
-    const CATALOG_SHIFT_PX = 48;
+    const CATALOG_SHIFT_VW = 2.5;
+    const CATALOG_SHIFT_MIN_PX = 24;
+    const CATALOG_SHIFT_MAX_PX = 96;
     const PAGE_BRIDGE_NODE_ID = 'lv-weread-page-state';
-    const TRACKER_PREFIX = 'lv-weread-page-tracker:v8:';
+    const TRACKER_PREFIX = 'lv-weread-page-tracker:v9:';
 
     const runtime = {
         observer: null,
@@ -42,9 +44,10 @@
     bootstrap();
 
     function bootstrap() {
+        installPageBridge();
+
         const onReady = () => {
             installStyles();
-            installPageBridge();
             installDebugHelper();
             observeDom();
             installCatalogJumpHook();
@@ -113,6 +116,9 @@
 
                 window.__lvWereadPageBridgeInstalled = true;
                 var NODE_ID = ${JSON.stringify(PAGE_BRIDGE_NODE_ID)};
+                var cachedStore = null;
+                var cachedReader = null;
+                var lastGoodPayload = null;
 
                 function ensureNode() {
                     var node = document.getElementById(NODE_ID);
@@ -166,7 +172,12 @@
                 }
 
                 function findStore() {
+                    if (cachedStore && cachedStore.state) {
+                        return cachedStore;
+                    }
+
                     if (window.store && window.store.state) {
+                        cachedStore = window.store;
                         return window.store;
                     }
 
@@ -189,6 +200,7 @@
                             var app = hook.apps[i];
                             var appStore = app && app.app && app.app.config && app.app.config.globalProperties && app.app.config.globalProperties.$store;
                             if (appStore && appStore.state) {
+                                cachedStore = appStore;
                                 return appStore;
                             }
                         }
@@ -203,6 +215,7 @@
                     if (directApp) {
                         var directStore = getStoreFromInstance(directApp, new Set());
                         if (directStore) {
+                            cachedStore = directStore;
                             return directStore;
                         }
                     }
@@ -242,6 +255,7 @@
                             );
                             var store = getStoreFromInstance(instance, new Set());
                             if (store) {
+                                cachedStore = store;
                                 return store;
                             }
                         }
@@ -251,8 +265,16 @@
                 }
 
                 function getReaderState() {
+                    if (cachedReader && cachedReader.currentChapter) {
+                        return {
+                            source: 'cached-reader',
+                            reader: cachedReader
+                        };
+                    }
+
                     var store = findStore();
                     if (store && store.state && store.state.reader) {
+                        cachedReader = store.state.reader;
                         return {
                             source: 'store',
                             reader: store.state.reader
@@ -260,6 +282,7 @@
                     }
 
                     if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.sState && window.__INITIAL_STATE__.sState.reader) {
+                        cachedReader = window.__INITIAL_STATE__.sState.reader;
                         return {
                             source: 'sState',
                             reader: window.__INITIAL_STATE__.sState.reader
@@ -267,6 +290,7 @@
                     }
 
                     if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.reader) {
+                        cachedReader = window.__INITIAL_STATE__.reader;
                         return {
                             source: 'initial',
                             reader: window.__INITIAL_STATE__.reader
@@ -281,7 +305,7 @@
                     var result = getReaderState();
 
                     if (!result || !result.reader) {
-                        node.textContent = JSON.stringify({
+                        node.textContent = JSON.stringify(lastGoodPayload || {
                             ready: false,
                             ts: Date.now()
                         });
@@ -317,14 +341,22 @@
                         }
                     };
 
-                    node.textContent = JSON.stringify(payload);
+                    if (
+                        Number(payload.currentChapterUid || 0) > 0
+                        || Number(payload.progressChapterUid || 0) > 0
+                        || Number(payload.sectionCount || 0) > 0
+                    ) {
+                        lastGoodPayload = payload;
+                    }
+
+                    node.textContent = JSON.stringify(lastGoodPayload || payload);
                 }
 
                 publish();
                 window.addEventListener('scroll', publish, { passive: true });
                 window.addEventListener('resize', publish, { passive: true });
                 window.addEventListener('load', publish, { passive: true });
-                window.setInterval(publish, 400);
+                window.setInterval(publish, 120);
             })();
         `;
 
@@ -653,7 +685,7 @@
             : 1;
         const trackerKey = targetChapter.chapterUid || normalizeText(targetChapter.title);
         const tracker = runtime.chapterTrackers.get(trackerKey) || readTracker(trackerKey) || {
-            currentPage: 1,
+            currentPage: targetPage,
             maxPage: targetPage,
             currentTopSignature: '',
             signatureMap: {},
@@ -662,6 +694,7 @@
             maxSeenScrollTopThisPage: 0
         };
 
+        tracker.currentPage = targetPage;
         tracker.maxPage = Math.max(Number(tracker.maxPage || 1), targetPage);
         tracker.initialized = true;
         runtime.chapterTrackers.set(trackerKey, tracker);
@@ -758,7 +791,13 @@
             return;
         }
 
-        catalog.style.setProperty('margin-left', `${CATALOG_SHIFT_PX}px`, 'important');
+        catalog.style.setProperty('margin-left', `${getCatalogShiftPx()}px`, 'important');
+    }
+
+    function getCatalogShiftPx() {
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+        const responsiveShift = Math.round(viewportWidth * CATALOG_SHIFT_VW / 100);
+        return clamp(responsiveShift, CATALOG_SHIFT_MIN_PX, CATALOG_SHIFT_MAX_PX);
     }
 
     function getBookId() {
@@ -1121,9 +1160,6 @@
             && Date.now() - Number(runtime.chapterTurnIntent.at || 0) <= 5000
             ? runtime.chapterTurnIntent
             : null;
-        const justEnteredChapter = runtime.activeChapterKey === normalizeText(chapter.title)
-            && Date.now() - Number(runtime.chapterEnteredAt || 0) <= 2500;
-
         if (!tracker.signatureMap || typeof tracker.signatureMap !== 'object') {
             tracker.signatureMap = {};
         }
@@ -1187,14 +1223,6 @@
                     tracker.signatureMap[signature] = tracker.currentPage;
                     tracker.maxSeenScrollTopThisPage = scrollTop;
                     runtime.pageTurnIntent = null;
-                } else if (justEnteredChapter) {
-                    tracker.currentPage = 1;
-                    tracker.maxPage = Math.max(Number(tracker.maxPage || 1), 1);
-                    tracker.currentTopSignature = signature;
-                    tracker.signatureMap = {
-                        [signature]: 1
-                    };
-                    tracker.maxSeenScrollTopThisPage = scrollTop;
                 } else if (knownPage > 0) {
                     tracker.currentPage = knownPage;
                     tracker.maxPage = Math.max(Number(tracker.maxPage || 1), knownPage);
@@ -1227,7 +1255,8 @@
 
     function readTracker(trackerKey) {
         try {
-            const raw = window.sessionStorage.getItem(`${TRACKER_PREFIX}${runtime.bookId || 'default'}:${trackerKey}`);
+            const raw = window.localStorage.getItem(`${TRACKER_PREFIX}${runtime.bookId || 'default'}:${trackerKey}`)
+                || window.sessionStorage.getItem(`${TRACKER_PREFIX}${runtime.bookId || 'default'}:${trackerKey}`);
             return raw ? JSON.parse(raw) : null;
         } catch (error) {
             return null;
@@ -1236,17 +1265,23 @@
 
     function writeTracker(trackerKey, tracker) {
         try {
+            const payload = JSON.stringify({
+                currentPage: Number(tracker.currentPage || 1),
+                maxPage: Number(tracker.maxPage || 1),
+                currentTopSignature: String(tracker.currentTopSignature || ''),
+                signatureMap: tracker.signatureMap || {},
+                lastScrollTop: Number(tracker.lastScrollTop || 0),
+                initialized: Boolean(tracker.initialized),
+                maxSeenScrollTopThisPage: Number(tracker.maxSeenScrollTopThisPage || 0)
+            });
+
+            window.localStorage.setItem(
+                `${TRACKER_PREFIX}${runtime.bookId || 'default'}:${trackerKey}`,
+                payload
+            );
             window.sessionStorage.setItem(
                 `${TRACKER_PREFIX}${runtime.bookId || 'default'}:${trackerKey}`,
-                JSON.stringify({
-                    currentPage: Number(tracker.currentPage || 1),
-                    maxPage: Number(tracker.maxPage || 1),
-                    currentTopSignature: String(tracker.currentTopSignature || ''),
-                    signatureMap: tracker.signatureMap || {},
-                    lastScrollTop: Number(tracker.lastScrollTop || 0),
-                    initialized: Boolean(tracker.initialized),
-                    maxSeenScrollTopThisPage: Number(tracker.maxSeenScrollTopThisPage || 0)
-                })
+                payload
             );
         } catch (error) {}
     }
