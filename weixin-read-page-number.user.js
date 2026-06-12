@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书目录页码与阅读进度
 // @namespace    https://github.com/0CalEmotion
-// @version      0.7.2
+// @version      0.7.3
 // @description  在微信读书网页版目录中显示章节页码，并在顶部显示当前阅读进度。
 // @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
@@ -95,8 +95,9 @@
 
             .readerCatalog_list_item_selected .lv-page-meta {
                 color: #4ea1ff;
-            }
 
+            
+                }
             .readerCatalog_list_item_info {
                 min-width: 0;
             }
@@ -694,10 +695,7 @@
                 return;
             }
 
-            meta.textContent = `(${chapter.startPage})`;
-            if (normalizeText(chapter.title) === normalizeText(current.chapterTitle)) {
-                meta.textContent = `(${chapter.startPage}) 当前(${current.currentChapterPage}/${chapter.pageCount})`;
-            }
+            meta.textContent = String(chapter.startPage);
         });
     }
 
