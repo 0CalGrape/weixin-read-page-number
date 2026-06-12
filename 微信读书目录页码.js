@@ -1,26 +1,21 @@
 // ==UserScript==
-// @name         WeRead Catalog Pages + Top Progress
-// @namespace    mailto:olv@foxmail.com
-// @version      0.6.7
-// @description  Show chapter page numbers in WeRead catalog and add top reading progress.
-// @author       olv
+// @name         微信读书目录页码与阅读进度
+// @namespace    https://github.com/0CalEmotion
+// @version      0.7.0
+// @description  在微信读书网页版目录中显示章节页码，并在顶部显示当前阅读进度。
+// @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
-// @run-at       document-start
+// @run-at       document-idle
 // @grant        GM_addStyle
-// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const CACHE_PREFIX = 'lv-weread-wpp:v3:';
     const DEFAULT_WORDS_PER_PAGE = 10000;
-    const MIN_WORDS_PER_PAGE = 600;
-    const MAX_WORDS_PER_PAGE = 20000;
-    const CATALOG_SHIFT_VW = 2.5;
-    const CATALOG_SHIFT_MIN_PX = 24;
-    const CATALOG_SHIFT_MAX_PX = 96;
-    const PAGE_BRIDGE_NODE_ID = 'lv-weread-page-state';
+    const CATALOG_SHIFT_VW = 0;
+    const CATALOG_SHIFT_MIN_PX = 0;
+    const CATALOG_SHIFT_MAX_PX = 300;
     const TRACKER_PREFIX = 'lv-weread-page-tracker:v9:';
 
     const runtime = {
@@ -32,11 +27,9 @@
         chapterTrackers: new Map(),
         lastChapterTitle: '',
         lastSignature: '',
-        pageBridgeInstalled: false,
         catalogClickBound: false,
         pendingCatalogJump: null,
         activeChapterKey: '',
-        chapterEnteredAt: 0,
         pageTurnIntent: null,
         chapterTurnIntent: null
     };
@@ -44,11 +37,8 @@
     bootstrap();
 
     function bootstrap() {
-        installPageBridge();
-
         const onReady = () => {
             installStyles();
-            installDebugHelper();
             observeDom();
             installCatalogJumpHook();
             installPageTurnIntentHooks();
@@ -65,335 +55,6 @@
         } else {
             onReady();
         }
-    }
-
-    function installDebugHelper() {
-        const debugApi = {
-            snapshot(label) {
-                const data = collectDebugState(label || '');
-                console.log('[lv-weread][snapshot]', data);
-                return data;
-            },
-            dumpVisibleTexts() {
-                const texts = getVisibleTextItems().map((item, index) => ({
-                    index,
-                    text: item.text,
-                    top: Math.round(item.top),
-                    bottom: Math.round(item.bottom)
-                }));
-                console.log('[lv-weread][visible-texts]', texts);
-                return texts;
-            },
-            resetTrackers() {
-                runtime.chapterTrackers.clear();
-                runtime.lastSignature = '';
-                console.log('[lv-weread] trackers reset');
-            }
-        };
-
-        window.__lvWereadDebug = debugApi;
-        globalThis.__lvWereadDebug = debugApi;
-
-        if (typeof unsafeWindow !== 'undefined' && unsafeWindow) {
-            unsafeWindow.__lvWereadDebug = debugApi;
-        }
-
-        console.log('[lv-weread] debug helper ready', typeof unsafeWindow !== 'undefined' ? 'unsafeWindow' : 'window');
-    }
-
-    function installPageBridge() {
-        if (runtime.pageBridgeInstalled || document.getElementById(`${PAGE_BRIDGE_NODE_ID}-injector`)) {
-            return;
-        }
-
-        const script = document.createElement('script');
-        script.id = `${PAGE_BRIDGE_NODE_ID}-injector`;
-        script.textContent = `
-            (function () {
-                if (window.__lvWereadPageBridgeInstalled) {
-                    return;
-                }
-
-                window.__lvWereadPageBridgeInstalled = true;
-                var NODE_ID = ${JSON.stringify(PAGE_BRIDGE_NODE_ID)};
-                var cachedStore = null;
-                var cachedReader = null;
-                var lastGoodPayload = null;
-
-                function ensureNode() {
-                    var node = document.getElementById(NODE_ID);
-                    if (!node) {
-                        node = document.createElement('script');
-                        node.id = NODE_ID;
-                        node.type = 'application/json';
-                        (document.documentElement || document.head || document.body).appendChild(node);
-                    }
-                    return node;
-                }
-
-                function getStoreFromInstance(instance, seen) {
-                    if (!instance || typeof instance !== 'object' || seen.has(instance)) {
-                        return null;
-                    }
-
-                    seen.add(instance);
-
-                    var directStore = instance.$store
-                        || instance.ctx && instance.ctx.$store
-                        || instance.proxy && instance.proxy.$store
-                        || instance.appContext && instance.appContext.config && instance.appContext.config.globalProperties && instance.appContext.config.globalProperties.$store
-                        || instance.appContext && instance.appContext.provides && (instance.appContext.provides.store || instance.appContext.provides.$store)
-                        || instance.provides && (instance.provides.store || instance.provides.$store);
-
-                    if (directStore && directStore.state) {
-                        return directStore;
-                    }
-
-                    var nextCandidates = [
-                        instance.$parent,
-                        instance.parent,
-                        instance.root,
-                        instance._provided,
-                        instance.ctx,
-                        instance.proxy,
-                        instance.component,
-                        instance.subTree && instance.subTree.component,
-                        instance.vnode && instance.vnode.component
-                    ];
-
-                    for (var i = 0; i < nextCandidates.length; i += 1) {
-                        var found = getStoreFromInstance(nextCandidates[i], seen);
-                        if (found) {
-                            return found;
-                        }
-                    }
-
-                    return null;
-                }
-
-                function findStore() {
-                    if (cachedStore && cachedStore.state) {
-                        return cachedStore;
-                    }
-
-                    if (window.store && window.store.state) {
-                        cachedStore = window.store;
-                        return window.store;
-                    }
-
-                    if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.sState && window.__INITIAL_STATE__.sState.reader) {
-                        try {
-                            var stateReader = window.__INITIAL_STATE__.sState.reader;
-                            if (stateReader && stateReader.bookInfo) {
-                                return {
-                                    state: {
-                                        reader: stateReader
-                                    }
-                                };
-                            }
-                        } catch (error) {}
-                    }
-
-                    var hook = window.__VUE_DEVTOOLS_GLOBAL_HOOK__;
-                    if (hook && Array.isArray(hook.apps)) {
-                        for (var i = 0; i < hook.apps.length; i += 1) {
-                            var app = hook.apps[i];
-                            var appStore = app && app.app && app.app.config && app.app.config.globalProperties && app.app.config.globalProperties.$store;
-                            if (appStore && appStore.state) {
-                                cachedStore = appStore;
-                                return appStore;
-                            }
-                        }
-                    }
-
-                    var directApp = window.__vue_app__
-                        || window.__VUE_APP__
-                        || window.__app__
-                        || window.$app
-                        || window.app;
-
-                    if (directApp) {
-                        var directStore = getStoreFromInstance(directApp, new Set());
-                        if (directStore) {
-                            cachedStore = directStore;
-                            return directStore;
-                        }
-                    }
-
-                    var candidates = [];
-                    var root = document.querySelector('#app') || document.body;
-                    if (root) {
-                        candidates.push(root);
-                    }
-
-                    var readers = document.querySelectorAll('.wr_page_reader, .readerTopBar, .readerChapterContent');
-                    for (var j = 0; j < readers.length; j += 1) {
-                        candidates.push(readers[j]);
-                    }
-
-                    for (var k = 0; k < candidates.length; k += 1) {
-                        var el = candidates[k];
-                        if (!el || !el.getElementsByTagName) {
-                            continue;
-                        }
-
-                        var nodes = [el];
-                        var descendants = el.getElementsByTagName('*');
-                        for (var m = 0; m < descendants.length && m < 80; m += 1) {
-                            nodes.push(descendants[m]);
-                        }
-
-                        for (var n = 0; n < nodes.length; n += 1) {
-                            var node = nodes[n];
-                            var instance = node && (
-                                node.__vue__
-                                || node.__vueParentComponent
-                                || node.__vue_app__
-                                || node.__vnode
-                                || node._vnode
-                                || node.__vnodeParent
-                            );
-                            var store = getStoreFromInstance(instance, new Set());
-                            if (store) {
-                                cachedStore = store;
-                                return store;
-                            }
-                        }
-                    }
-
-                    return null;
-                }
-
-                function getReaderState() {
-                    if (cachedReader && cachedReader.currentChapter) {
-                        return {
-                            source: 'cached-reader',
-                            reader: cachedReader
-                        };
-                    }
-
-                    var store = findStore();
-                    if (store && store.state && store.state.reader) {
-                        cachedReader = store.state.reader;
-                        return {
-                            source: 'store',
-                            reader: store.state.reader
-                        };
-                    }
-
-                    if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.sState && window.__INITIAL_STATE__.sState.reader) {
-                        cachedReader = window.__INITIAL_STATE__.sState.reader;
-                        return {
-                            source: 'sState',
-                            reader: window.__INITIAL_STATE__.sState.reader
-                        };
-                    }
-
-                    if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.reader) {
-                        cachedReader = window.__INITIAL_STATE__.reader;
-                        return {
-                            source: 'initial',
-                            reader: window.__INITIAL_STATE__.reader
-                        };
-                    }
-
-                    return null;
-                }
-
-                function publish() {
-                    var node = ensureNode();
-                    var result = getReaderState();
-
-                    if (!result || !result.reader) {
-                        node.textContent = JSON.stringify(lastGoodPayload || {
-                            ready: false,
-                            ts: Date.now()
-                        });
-                        return;
-                    }
-
-                    var reader = result.reader;
-                    var payload = {
-                        ready: true,
-                        source: result.source,
-                        ts: Date.now(),
-                        currentChapterUid: Number(reader.currentChapter && reader.currentChapter.chapterUid || 0),
-                        currentSectionIdx: Number(reader.currentSectionIdx || 0),
-                        sectionCount: Array.isArray(reader.chapterContentHtml) ? reader.chapterContentHtml.length : 0,
-                        sectionStep: Number(reader.sectionStep || 0),
-                        progressChapterUid: Number(reader.progress && reader.progress.book && reader.progress.book.chapterUid || 0),
-                        progressOffset: Number(reader.progress && reader.progress.book && reader.progress.book.chapterOffset || 0),
-                        progressPercent: Number(reader.progress && reader.progress.book && reader.progress.book.progress || 0),
-                        debug: {
-                            hasWindowStore: !!(window.store && window.store.state),
-                            hasVueHook: !!window.__VUE_DEVTOOLS_GLOBAL_HOOK__,
-                            hasInitialSState: !!(window.__INITIAL_STATE__ && window.__INITIAL_STATE__.sState && window.__INITIAL_STATE__.sState.reader),
-                            hasInitialReader: !!(window.__INITIAL_STATE__ && window.__INITIAL_STATE__.reader),
-                            rootKeys: (function () {
-                                var root = document.querySelector('#app') || document.body;
-                                if (!root) {
-                                    return [];
-                                }
-                                return Object.getOwnPropertyNames(root).filter(function (key) {
-                                    return /vue|react|store|vnode/i.test(key);
-                                }).slice(0, 20);
-                            })()
-                        }
-                    };
-
-                    if (
-                        Number(payload.currentChapterUid || 0) > 0
-                        || Number(payload.progressChapterUid || 0) > 0
-                        || Number(payload.sectionCount || 0) > 0
-                    ) {
-                        lastGoodPayload = payload;
-                    }
-
-                    node.textContent = JSON.stringify(lastGoodPayload || payload);
-                }
-
-                publish();
-                window.addEventListener('scroll', publish, { passive: true });
-                window.addEventListener('resize', publish, { passive: true });
-                window.addEventListener('load', publish, { passive: true });
-                window.setInterval(publish, 120);
-            })();
-        `;
-
-        (document.head || document.documentElement).appendChild(script);
-        script.remove();
-        runtime.pageBridgeInstalled = true;
-    }
-
-    function collectDebugState(label) {
-        const chapterTitle = getCurrentChapterTitle();
-        const measurement = measureCurrentChapter();
-        const pageState = readPageBridgeState();
-        const pagination = measurement ? buildPagination(runtime.chapters, chapterTitle, measurement, pageState) : [];
-        const current = measurement ? buildCurrentProgress(pagination, chapterTitle, measurement, pageState) : null;
-        const currentChapter = pagination.find((chapter) => normalizeText(chapter.title) === normalizeText(chapterTitle)) || null;
-        const trackerKey = currentChapter ? (currentChapter.chapterUid || normalizeText(currentChapter.title)) : '';
-        const tracker = trackerKey ? (runtime.chapterTrackers.get(trackerKey) || null) : null;
-
-        return {
-            label,
-            bookId: runtime.bookId,
-            chapterTitle,
-            topProgressText: document.querySelector('.lv-top-progress')?.textContent?.trim() || '',
-            scrollTop: Math.round(window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0),
-            viewportHeight: window.innerHeight || document.documentElement.clientHeight || 0,
-            pageState,
-            measurement,
-            current,
-            currentChapter,
-            tracker,
-            visibleTexts: getVisibleTextItems().slice(0, 12).map((item, index) => ({
-                index,
-                text: item.text,
-                top: Math.round(item.top),
-                bottom: Math.round(item.bottom)
-            }))
-        };
     }
 
     function installStyles() {
@@ -525,11 +186,11 @@
                 return;
             }
 
-            const pageTurnButton = target.closest('button.readerHeaderButton, button.readerFooter_button');
+            const pageTurnButton = target.closest('button.readerHeaderButton, button.readerFooter_button, button.renderTarget_pager_button');
             if (pageTurnButton) {
                 const text = (pageTurnButton.textContent || '').trim();
                 if (text.includes('下一页')) {
-                    capturePageTurnIntent('forward', { force: true, optimistic: true });
+                    capturePageTurnIntent('forward', { force: true, optimistic: true, allowExtend: true });
                     return;
                 }
                 if (text.includes('上一页')) {
@@ -597,24 +258,24 @@
         }
 
         const expectedPage = options.optimistic
-            ? applyImmediatePageTurn(direction, chapterTitle, measurement, pageStateSafe())
+            ? applyImmediatePageTurn(direction, chapterTitle, measurement, options)
             : 0;
 
         runtime.pageTurnIntent = {
             direction,
             chapterKey: normalizeText(chapterTitle),
             at: Date.now(),
-            optimisticApplied: Boolean(options.optimistic),
+            optimisticApplied: Boolean(expectedPage > 0),
             expectedPage: Number(expectedPage || 0)
         };
     }
 
-    function applyImmediatePageTurn(direction, chapterTitle, measurement, pageState) {
+    function applyImmediatePageTurn(direction, chapterTitle, measurement, options = {}) {
         if (!runtime.chapters.length || !chapterTitle || !measurement) {
             return 0;
         }
 
-        const pagination = buildPagination(runtime.chapters, chapterTitle, measurement, pageState);
+        const pagination = buildPagination(runtime.chapters);
         const chapter = pagination.find((item) => normalizeText(item.title) === normalizeText(chapterTitle));
         if (!chapter) {
             return 0;
@@ -634,6 +295,9 @@
         const currentPage = Math.max(1, Number(tracker.currentPage || 1));
 
         if (direction === 'forward' && currentPage < pageCount) {
+            tracker.currentPage = currentPage + 1;
+            tracker.maxPage = Math.max(Number(tracker.maxPage || 1), tracker.currentPage);
+        } else if (direction === 'forward' && options.allowExtend) {
             tracker.currentPage = currentPage + 1;
             tracker.maxPage = Math.max(Number(tracker.maxPage || 1), tracker.currentPage);
         } else if (direction === 'backward' && currentPage > 1) {
@@ -667,8 +331,7 @@
             trackerSignature: '',
             nearBottom: false
         };
-        const pageState = pageStateSafe();
-        const pagination = buildPagination(runtime.chapters, chapterTitle, measurement, pageState);
+        const pagination = buildPagination(runtime.chapters);
         const currentIndex = pagination.findIndex((item) => normalizeText(item.title) === normalizeText(chapterTitle));
         if (currentIndex < 0) {
             return;
@@ -710,10 +373,6 @@
         runtime.lastSignature = '';
     }
 
-    function pageStateSafe() {
-        return readPageBridgeState();
-    }
-
     function scheduleRefresh() {
         window.clearTimeout(runtime.refreshTimer);
         runtime.refreshTimer = window.setTimeout(() => {
@@ -752,13 +411,11 @@
         const chapterKey = normalizeText(chapterTitle);
         if (chapterKey && chapterKey !== runtime.activeChapterKey) {
             runtime.activeChapterKey = chapterKey;
-            runtime.chapterEnteredAt = Date.now();
             runtime.pageTurnIntent = null;
         }
         const measurement = measureCurrentChapter();
-        const pageState = readPageBridgeState();
-        const pagination = buildPagination(runtime.chapters, chapterTitle, measurement, pageState);
-        const current = buildCurrentProgress(pagination, chapterTitle, measurement, pageState);
+        const pagination = buildPagination(runtime.chapters);
+        const current = buildCurrentProgress(pagination, chapterTitle, measurement);
         if (!current) {
             return;
         }
@@ -900,15 +557,13 @@
         };
     }
 
-    function buildPagination(chapters, currentChapterTitle, measurement, pageState) {
-        const normalizedCurrentTitle = normalizeText(currentChapterTitle);
-        const currentChapter = chapters.find((chapter) => normalizeText(chapter.title) === normalizedCurrentTitle) || null;
-        const wordsPerPage = getWordsPerPage(currentChapter, measurement, pageState);
+    function buildPagination(chapters) {
+        const wordsPerPage = DEFAULT_WORDS_PER_PAGE;
 
         let startPage = 1;
 
         return chapters.map((chapter) => {
-            const pageCount = getChapterPageCount(chapter, wordsPerPage, pageState);
+            const pageCount = getChapterPageCount(chapter, wordsPerPage);
 
             const item = {
                 ...chapter,
@@ -922,7 +577,7 @@
         });
     }
 
-    function buildCurrentProgress(pagination, currentChapterTitle, measurement, pageState) {
+    function buildCurrentProgress(pagination, currentChapterTitle, measurement) {
         if (!currentChapterTitle || !measurement) {
             return null;
         }
@@ -933,7 +588,7 @@
             return null;
         }
 
-        const chapterProgress = getChapterProgress(currentChapter, measurement, pageState);
+        const chapterProgress = getChapterProgress(currentChapter, measurement);
         const currentChapterPage = clamp(chapterProgress.currentPage || 1, 1, currentChapter.pageCount);
 
         return {
@@ -948,45 +603,7 @@
         };
     }
 
-    function getWordsPerPage(currentChapter, measurement, pageState) {
-        const cacheKey = `${CACHE_PREFIX}${runtime.bookId || 'default'}`;
-        const cachedValue = Number(window.localStorage.getItem(cacheKey) || '');
-
-        if (
-            currentChapter
-            && pageState
-            && pageState.ready
-            && String(pageState.currentChapterUid || '') === String(currentChapter.chapterUid || '')
-            && Number(pageState.sectionCount || 0) >= 2
-            && currentChapter.wordCount >= 3000
-        ) {
-            const measured = clamp(
-                Math.round(currentChapter.wordCount / Math.max(1, Number(pageState.sectionCount || 1))),
-                MIN_WORDS_PER_PAGE,
-                MAX_WORDS_PER_PAGE
-            );
-            window.localStorage.setItem(cacheKey, String(measured));
-            return measured;
-        }
-
-        if (Number.isFinite(cachedValue) && cachedValue > 0) {
-            return cachedValue;
-        }
-
-        return DEFAULT_WORDS_PER_PAGE;
-    }
-
-    function getChapterPageCount(chapter, wordsPerPage, pageState) {
-        if (
-            chapter
-            && pageState
-            && pageState.ready
-            && Number(pageState.sectionCount || 0) > 0
-            && String(pageState.currentChapterUid || '') === String(chapter.chapterUid || '')
-        ) {
-            return Math.max(1, Number(pageState.sectionCount || 1));
-        }
-
+    function getChapterPageCount(chapter, wordsPerPage) {
         const trackerKey = chapter && (chapter.chapterUid || normalizeText(chapter.title));
         const tracker = trackerKey ? readTracker(trackerKey) : null;
         return Math.max(estimatePageCount(chapter, wordsPerPage), Number(tracker && tracker.maxPage || 1));
@@ -1114,24 +731,7 @@
         ].join('');
     }
 
-    function getChapterProgress(chapter, measurement, pageState) {
-        if (
-            pageState
-            && pageState.ready
-            && String(pageState.currentChapterUid || '') === String(chapter.chapterUid || '')
-            && Number(pageState.sectionCount || 0) > 0
-        ) {
-            const sectionCount = Math.max(1, Number(pageState.sectionCount || 1));
-            const currentPage = clamp(Number(pageState.currentSectionIdx || 0) + 1, 1, sectionCount);
-
-            return {
-                currentPage,
-                overallRatio: currentPage / sectionCount,
-                segmentIndex: currentPage,
-                segmentCount: sectionCount
-            };
-        }
-
+    function getChapterProgress(chapter, measurement) {
         const trackerKey = chapter.chapterUid || normalizeText(chapter.title);
         const storedTracker = readTracker(trackerKey);
         const tracker = runtime.chapterTrackers.get(trackerKey) || storedTracker || {
@@ -1284,19 +884,6 @@
                 payload
             );
         } catch (error) {}
-    }
-
-    function readPageBridgeState() {
-        const node = document.getElementById(PAGE_BRIDGE_NODE_ID);
-        if (!node || !node.textContent) {
-            return null;
-        }
-
-        try {
-            return JSON.parse(node.textContent);
-        } catch (error) {
-            return null;
-        }
     }
 
     function getContentSignature(renderNode) {
