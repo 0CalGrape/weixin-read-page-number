@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WeRead Catalog Pages + Top Progress
 // @namespace    mailto:olv@foxmail.com
-// @version      0.6.5
+// @version      0.6.6
 // @description  Show chapter page numbers in WeRead catalog and add top reading progress.
 // @author       olv
 // @match        https://weread.qq.com/web/reader/*
@@ -17,7 +17,7 @@
     const DEFAULT_WORDS_PER_PAGE = 10000;
     const MIN_WORDS_PER_PAGE = 600;
     const MAX_WORDS_PER_PAGE = 20000;
-    const CATALOG_SHIFT_PX = 32;
+    const CATALOG_SHIFT_PX = 48;
     const PAGE_BRIDGE_NODE_ID = 'lv-weread-page-state';
     const TRACKER_PREFIX = 'lv-weread-page-tracker:v8:';
 
@@ -564,88 +564,28 @@
             return;
         }
 
-        if (options.optimistic) {
-            applyImmediatePageTurn(direction, chapterTitle, measurement, pageStateSafe());
-        }
+        const expectedPage = options.optimistic
+            ? applyImmediatePageTurn(direction, chapterTitle, measurement, pageStateSafe())
+            : 0;
 
         runtime.pageTurnIntent = {
             direction,
             chapterKey: normalizeText(chapterTitle),
-            at: Date.now()
+            at: Date.now(),
+            optimisticApplied: Boolean(options.optimistic),
+            expectedPage: Number(expectedPage || 0)
         };
-    }
-
-    function captureChapterTurnIntent(direction) {
-        if (!runtime.chapters.length) {
-            return;
-        }
-
-        const chapterTitle = getCurrentChapterTitle();
-        if (!chapterTitle) {
-            return;
-        }
-
-        const measurement = measureCurrentChapter();
-        const pageState = pageStateSafe();
-        const pagination = measurement
-            ? buildPagination(runtime.chapters, chapterTitle, measurement, pageState)
-            : buildPagination(runtime.chapters, chapterTitle, {
-                viewportHeight: window.innerHeight || document.documentElement.clientHeight || 0,
-                scrollTop: window.pageYOffset || 0,
-                trackerSignature: '',
-                contentSignature: '',
-                nearBottom: false
-            }, pageState);
-        const currentIndex = pagination.findIndex((item) => normalizeText(item.title) === normalizeText(chapterTitle));
-        if (currentIndex < 0) {
-            return;
-        }
-
-        const targetIndex = direction === 'forward' ? currentIndex + 1 : currentIndex - 1;
-        const targetChapter = pagination[targetIndex];
-        if (!targetChapter) {
-            return;
-        }
-
-        const targetPage = direction === 'backward'
-            ? Math.max(1, Number(targetChapter.pageCount || 1))
-            : 1;
-        const trackerKey = targetChapter.chapterUid || normalizeText(targetChapter.title);
-        const tracker = runtime.chapterTrackers.get(trackerKey) || readTracker(trackerKey) || {
-            currentPage: targetPage,
-            maxPage: targetPage,
-            currentTopSignature: '',
-            signatureMap: {},
-            lastScrollTop: 0,
-            initialized: true,
-            maxSeenScrollTopThisPage: 0
-        };
-
-        tracker.currentPage = targetPage;
-        tracker.maxPage = Math.max(Number(tracker.maxPage || 1), targetPage);
-        tracker.initialized = true;
-        runtime.chapterTrackers.set(trackerKey, tracker);
-        writeTracker(trackerKey, tracker);
-
-        runtime.chapterTurnIntent = {
-            direction,
-            targetChapterKey: normalizeText(targetChapter.title),
-            targetPage,
-            at: Date.now()
-        };
-        runtime.pageTurnIntent = null;
-        runtime.lastSignature = '';
     }
 
     function applyImmediatePageTurn(direction, chapterTitle, measurement, pageState) {
         if (!runtime.chapters.length || !chapterTitle || !measurement) {
-            return;
+            return 0;
         }
 
         const pagination = buildPagination(runtime.chapters, chapterTitle, measurement, pageState);
         const chapter = pagination.find((item) => normalizeText(item.title) === normalizeText(chapterTitle));
         if (!chapter) {
-            return;
+            return 0;
         }
 
         const trackerKey = chapter.chapterUid || normalizeText(chapter.title);
@@ -667,7 +607,7 @@
         } else if (direction === 'backward' && currentPage > 1) {
             tracker.currentPage = currentPage - 1;
         } else {
-            return;
+            return 0;
         }
 
         tracker.initialized = true;
@@ -675,6 +615,66 @@
         writeTracker(trackerKey, tracker);
         runtime.lastSignature = '';
         scheduleRefresh();
+        return Number(tracker.currentPage || 1);
+    }
+
+    function captureChapterTurnIntent(direction) {
+        if (!runtime.chapters.length) {
+            return;
+        }
+
+        const chapterTitle = getCurrentChapterTitle();
+        if (!chapterTitle) {
+            return;
+        }
+
+        const measurement = measureCurrentChapter() || {
+            viewportHeight: window.innerHeight || document.documentElement.clientHeight || 0,
+            scrollTop: window.pageYOffset || 0,
+            contentSignature: '',
+            trackerSignature: '',
+            nearBottom: false
+        };
+        const pageState = pageStateSafe();
+        const pagination = buildPagination(runtime.chapters, chapterTitle, measurement, pageState);
+        const currentIndex = pagination.findIndex((item) => normalizeText(item.title) === normalizeText(chapterTitle));
+        if (currentIndex < 0) {
+            return;
+        }
+
+        const targetIndex = direction === 'forward' ? currentIndex + 1 : currentIndex - 1;
+        const targetChapter = pagination[targetIndex];
+        if (!targetChapter) {
+            return;
+        }
+
+        const targetPage = direction === 'backward'
+            ? Math.max(1, Number(targetChapter.pageCount || 1))
+            : 1;
+        const trackerKey = targetChapter.chapterUid || normalizeText(targetChapter.title);
+        const tracker = runtime.chapterTrackers.get(trackerKey) || readTracker(trackerKey) || {
+            currentPage: 1,
+            maxPage: targetPage,
+            currentTopSignature: '',
+            signatureMap: {},
+            lastScrollTop: 0,
+            initialized: true,
+            maxSeenScrollTopThisPage: 0
+        };
+
+        tracker.maxPage = Math.max(Number(tracker.maxPage || 1), targetPage);
+        tracker.initialized = true;
+        runtime.chapterTrackers.set(trackerKey, tracker);
+        writeTracker(trackerKey, tracker);
+
+        runtime.chapterTurnIntent = {
+            direction,
+            targetChapterKey: normalizeText(targetChapter.title),
+            targetPage,
+            at: Date.now()
+        };
+        runtime.pageTurnIntent = null;
+        runtime.lastSignature = '';
     }
 
     function pageStateSafe() {
@@ -1157,16 +1157,36 @@
                     tracker.maxSeenScrollTopThisPage = scrollTop;
                     runtime.pendingCatalogJump = null;
                 } else if (pendingChapterTurn) {
-                    tracker.currentPage = clamp(
-                        Number(pendingChapterTurn.targetPage || 1),
+                    const resolvedPageCount = Math.max(
                         1,
-                        Math.max(1, Number(chapter.pageCount || 1), Number(tracker.maxPage || 1))
+                        Number(chapter.pageCount || 1),
+                        Number(tracker.maxPage || 1),
+                        Number(pendingChapterTurn.targetPage || 1)
                     );
-                    tracker.maxPage = Math.max(Number(tracker.maxPage || 1), tracker.currentPage);
+                    tracker.currentPage = pendingChapterTurn.direction === 'backward'
+                        ? resolvedPageCount
+                        : 1;
+                    tracker.maxPage = Math.max(Number(tracker.maxPage || 1), resolvedPageCount);
                     tracker.currentTopSignature = signature;
                     tracker.signatureMap[signature] = tracker.currentPage;
                     tracker.maxSeenScrollTopThisPage = scrollTop;
                     runtime.chapterTurnIntent = null;
+                } else if (changedTopSignature && pendingTurnIntent) {
+                    const expectedPage = Number(pendingTurnIntent.expectedPage || 0);
+                    if (expectedPage > 0) {
+                        tracker.currentPage = expectedPage;
+                    } else if (!pendingTurnIntent.optimisticApplied) {
+                        if (pendingTurnIntent.direction === 'forward') {
+                            tracker.currentPage = Math.max(1, Number(tracker.currentPage || 1) + 1);
+                        } else {
+                            tracker.currentPage = Math.max(1, Number(tracker.currentPage || 1) - 1);
+                        }
+                    }
+                    tracker.maxPage = Math.max(Number(tracker.maxPage || 1), Number(tracker.currentPage || 1));
+                    tracker.currentTopSignature = signature;
+                    tracker.signatureMap[signature] = tracker.currentPage;
+                    tracker.maxSeenScrollTopThisPage = scrollTop;
+                    runtime.pageTurnIntent = null;
                 } else if (justEnteredChapter) {
                     tracker.currentPage = 1;
                     tracker.maxPage = Math.max(Number(tracker.maxPage || 1), 1);
@@ -1180,17 +1200,6 @@
                     tracker.maxPage = Math.max(Number(tracker.maxPage || 1), knownPage);
                     tracker.currentTopSignature = signature;
                     tracker.maxSeenScrollTopThisPage = scrollTop;
-                } else if (changedTopSignature && pendingTurnIntent) {
-                    if (pendingTurnIntent.direction === 'forward') {
-                        tracker.currentPage = Math.max(1, Number(tracker.currentPage || 1) + 1);
-                        tracker.maxPage = Math.max(Number(tracker.maxPage || 1), Number(tracker.currentPage || 1));
-                    } else {
-                        tracker.currentPage = Math.max(1, Number(tracker.currentPage || 1) - 1);
-                    }
-                    tracker.currentTopSignature = signature;
-                    tracker.signatureMap[signature] = tracker.currentPage;
-                    tracker.maxSeenScrollTopThisPage = scrollTop;
-                    runtime.pageTurnIntent = null;
                 } else if (!hasKnownTopSignature || sameTopSignature) {
                     tracker.currentTopSignature = signature;
                     tracker.signatureMap[signature] = Number(tracker.currentPage || 1);
