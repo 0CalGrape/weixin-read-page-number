@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书目录页码与阅读进度
 // @namespace    https://github.com/0CalEmotion
-// @version      0.7.1
+// @version      0.7.2
 // @description  在微信读书网页版目录中显示章节页码，并在顶部显示当前阅读进度。
 // @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
@@ -426,6 +426,7 @@
             current.currentChapterPage,
             current.currentChapterPageCount,
             current.chapterProgressPercent,
+            current.bookProgressPercent,
             current.totalPages,
             current.chapterTitle,
             document.querySelectorAll('.readerCatalog_list > .readerCatalog_list_item').length
@@ -601,17 +602,27 @@
             currentChapter.pageCount,
             measurement.scrollProgressRatio
         );
+        const currentPage = currentChapter.startPage + currentChapterPage - 1;
+        const totalPages = pagination[pagination.length - 1]
+            ? pagination[pagination.length - 1].endPage
+            : currentChapter.endPage;
+        const bookProgressPercent = getBookProgressPercent(
+            currentPage,
+            totalPages,
+            measurement.scrollProgressRatio
+        );
 
         return {
             chapterTitle: currentChapter.title,
-            currentPage: currentChapter.startPage + currentChapterPage - 1,
+            currentPage,
             currentChapterPage,
             currentChapterPageCount: currentChapter.pageCount,
             chapterProgressPercent,
+            bookProgressPercent,
             currentChapterEndPage: currentChapter.endPage,
             chapterSegmentIndex: chapterProgress.segmentIndex,
             chapterSegmentCount: chapterProgress.segmentCount,
-            totalPages: pagination[pagination.length - 1] ? pagination[pagination.length - 1].endPage : currentChapter.endPage
+            totalPages
         };
     }
 
@@ -621,6 +632,14 @@
         const pageProgress = safeCurrentPage - 1;
         const scrollProgress = clamp(Number(scrollProgressRatio || 0), 0, 1);
         return Math.round(clamp((pageProgress + scrollProgress) / safePageCount, 0, 1) * 100);
+    }
+
+    function getBookProgressPercent(currentPage, totalPages, scrollProgressRatio) {
+        const safeTotalPages = Math.max(1, Number(totalPages || 1));
+        const safeCurrentPage = clamp(Number(currentPage || 1), 1, safeTotalPages);
+        const pageProgress = safeCurrentPage - 1;
+        const scrollProgress = clamp(Number(scrollProgressRatio || 0), 0, 1);
+        return (clamp((pageProgress + scrollProgress) / safeTotalPages, 0, 1) * 100).toFixed(2);
     }
 
     function getChapterPageCount(chapter, wordsPerPage) {
@@ -742,12 +761,9 @@
         }
 
         node.innerHTML = [
-            '<span>页码</span>',
-            `<strong>${current.currentPage}</strong>`,
-            '<span class="lv-top-progress-sep"></span>',
-            `<span>本章 ${current.currentChapterPage}/${current.currentChapterPageCount}，${current.chapterProgressPercent}%</span>`,
-            '<span class="lv-top-progress-sep"></span>',
-            `<span>全书 ${current.totalPages}</span>`
+            `<span>本章 ${current.currentChapterPage}/${current.currentChapterPageCount},${current.chapterProgressPercent}%</span>`,
+            '<span>|</span>',
+            `<span>全书 ${current.currentPage}/${current.totalPages},${current.bookProgressPercent}%</span>`
         ].join('');
     }
 
