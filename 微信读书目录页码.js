@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         微信读书目录页码与阅读进度
 // @namespace    https://github.com/0CalEmotion
-// @version      0.7.0
+// @version      0.7.1
 // @description  在微信读书网页版目录中显示章节页码，并在顶部显示当前阅读进度。
 // @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
 // @run-at       document-idle
 // @grant        GM_addStyle
+// @license    MIT
 // ==/UserScript==
 
 (function () {
@@ -424,6 +425,7 @@
             current.currentPage,
             current.currentChapterPage,
             current.currentChapterPageCount,
+            current.chapterProgressPercent,
             current.totalPages,
             current.chapterTitle,
             document.querySelectorAll('.readerCatalog_list > .readerCatalog_list_item').length
@@ -540,6 +542,9 @@
         const bottomOffset = clamp(scrollTop + viewportHeight - top, 1, totalHeight);
         const currentPage = clamp(Math.floor((bottomOffset - 1) / viewportHeight) + 1, 1, pageCount);
         const progressRatio = clamp(bottomOffset / totalHeight, 0, 1);
+        const scrollProgressRatio = totalHeight <= viewportHeight
+            ? 1
+            : clamp((scrollTop - top) / (totalHeight - viewportHeight), 0, 1);
         const contentSignature = getContentSignature(renderNode);
         const trackerSignature = getTrackerSignature(renderNode);
         const nearBottom = totalHeight - bottomOffset <= Math.max(80, viewportHeight * 0.2);
@@ -550,6 +555,7 @@
             pageCount,
             currentPage,
             progressRatio,
+            scrollProgressRatio,
             scrollTop,
             contentSignature,
             trackerSignature,
@@ -590,17 +596,31 @@
 
         const chapterProgress = getChapterProgress(currentChapter, measurement);
         const currentChapterPage = clamp(chapterProgress.currentPage || 1, 1, currentChapter.pageCount);
+        const chapterProgressPercent = getChapterProgressPercent(
+            currentChapterPage,
+            currentChapter.pageCount,
+            measurement.scrollProgressRatio
+        );
 
         return {
             chapterTitle: currentChapter.title,
             currentPage: currentChapter.startPage + currentChapterPage - 1,
             currentChapterPage,
             currentChapterPageCount: currentChapter.pageCount,
+            chapterProgressPercent,
             currentChapterEndPage: currentChapter.endPage,
             chapterSegmentIndex: chapterProgress.segmentIndex,
             chapterSegmentCount: chapterProgress.segmentCount,
             totalPages: pagination[pagination.length - 1] ? pagination[pagination.length - 1].endPage : currentChapter.endPage
         };
+    }
+
+    function getChapterProgressPercent(currentPage, pageCount, scrollProgressRatio) {
+        const safePageCount = Math.max(1, Number(pageCount || 1));
+        const safeCurrentPage = clamp(Number(currentPage || 1), 1, safePageCount);
+        const pageProgress = safeCurrentPage - 1;
+        const scrollProgress = clamp(Number(scrollProgressRatio || 0), 0, 1);
+        return Math.round(clamp((pageProgress + scrollProgress) / safePageCount, 0, 1) * 100);
     }
 
     function getChapterPageCount(chapter, wordsPerPage) {
@@ -722,10 +742,10 @@
         }
 
         node.innerHTML = [
-            '<span>阅读进度</span>',
+            '<span>页码</span>',
             `<strong>${current.currentPage}</strong>`,
             '<span class="lv-top-progress-sep"></span>',
-            `<span>本章 ${current.currentChapterPage}/${current.currentChapterPageCount}</span>`,
+            `<span>本章 ${current.currentChapterPage}/${current.currentChapterPageCount}，${current.chapterProgressPercent}%</span>`,
             '<span class="lv-top-progress-sep"></span>',
             `<span>全书 ${current.totalPages}</span>`
         ].join('');
