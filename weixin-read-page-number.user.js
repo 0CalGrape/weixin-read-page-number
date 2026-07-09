@@ -14,9 +14,6 @@
     'use strict';
 
     const DEFAULT_WORDS_PER_PAGE = 10000;
-    const CATALOG_SHIFT_VW = 0;
-    const CATALOG_SHIFT_MIN_PX = 0;
-    const CATALOG_SHIFT_MAX_PX = 300;
     const TRACKER_PREFIX = 'lv-weread-page-tracker:v9:';
 
     const runtime = {
@@ -86,6 +83,19 @@
                 background: rgba(255, 255, 255, 0.12);
             }
 
+            .wr_whiteTheme .lv-top-progress {
+                background: rgba(36, 41, 47, 0.08);
+                color: #24292f;
+            }
+
+            .wr_whiteTheme .lv-top-progress strong {
+                color: #1f2328;
+            }
+
+            .wr_whiteTheme .lv-top-progress .lv-top-progress-sep {
+                background: rgba(36, 41, 47, 0.18);
+            }
+
             .lv-page-meta {
                 margin-top: 6px;
                 color: #7f8790;
@@ -98,6 +108,15 @@
 
             
                 }
+
+            .wr_whiteTheme .lv-page-meta {
+                color: #57606a;
+            }
+
+            .wr_whiteTheme .readerCatalog_list_item_selected .lv-page-meta {
+                color: #0969da;
+            }
+
             .readerCatalog_list_item_info {
                 min-width: 0;
             }
@@ -393,8 +412,6 @@
             return;
         }
 
-        shiftCatalog();
-
         const bookId = getBookId();
         if (!bookId) {
             return;
@@ -448,21 +465,6 @@
 
     function isReaderPage() {
         return Boolean(document.querySelector('.readerTopBar') && document.querySelector('.readerChapterContent'));
-    }
-
-    function shiftCatalog() {
-        const catalog = document.querySelector('.readerCatalog');
-        if (!catalog) {
-            return;
-        }
-
-        catalog.style.setProperty('margin-left', `${getCatalogShiftPx()}px`, 'important');
-    }
-
-    function getCatalogShiftPx() {
-        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-        const responsiveShift = Math.round(viewportWidth * CATALOG_SHIFT_VW / 100);
-        return clamp(responsiveShift, CATALOG_SHIFT_MIN_PX, CATALOG_SHIFT_MAX_PX);
     }
 
     function getBookId() {

@@ -39,6 +39,59 @@ var flagPlay = false,flagBOT = false;
 let timeStopmin = GM_getValue("timeStopmin",0);
 var readerControls = document.getElementsByClassName("readerControls");
 var readerTopBar = document.getElementsByClassName("readerTopBar");
+
+// 目录横向位移：按视口宽度的百分比计算，并限制在最小/最大像素范围内。
+const CATALOG_SHIFT_VW = 0;
+const CATALOG_SHIFT_MIN_PX = 0;
+const CATALOG_SHIFT_MAX_PX = 300;
+
+function getCatalogShiftPx(){
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const responsiveShift = Math.round(viewportWidth * CATALOG_SHIFT_VW / 100);
+    return Math.min(CATALOG_SHIFT_MAX_PX, Math.max(CATALOG_SHIFT_MIN_PX, responsiveShift));
+}
+
+function shiftCatalog(){
+    const catalog = document.querySelector('.readerCatalog');
+    if(!catalog){return;}
+    catalog.style.setProperty('margin-left', `${getCatalogShiftPx()}px`, 'important');
+}
+
+function initCatalogShift(){
+    let scheduled = false;
+    const scheduleShift = function(){
+        if(scheduled){return;}
+        scheduled = true;
+        window.requestAnimationFrame(function(){
+            scheduled = false;
+            shiftCatalog();
+        });
+    };
+
+    scheduleShift();
+    window.addEventListener('resize', scheduleShift, {passive: true});
+    new MutationObserver(scheduleShift).observe(document.documentElement, {
+        childList: true,
+        subtree: true
+    });
+}
+
+if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', initCatalogShift, {once: true});
+}else{
+    initCatalogShift();
+}
+
+// 深色模式下微信读书会把正文图片降到 50% 不透明度，导致插图明显变暗。
+// 浅色模式使用 wr_whiteTheme，因而只在非浅色主题中恢复图片原始明度。
+GM_addStyle(`
+    body:not(.wr_whiteTheme) .readerChapterContent img.wr_readerImage_opacity,
+    body:not(.wr_whiteTheme) .renderTargetContent img.wr_readerImage_opacity {
+        opacity: 1 !important;
+        filter: none !important;
+    }
+`);
+
 function isEditableTarget(target){
     if(!target){return false;}
     const tagName = target.tagName;
