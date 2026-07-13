@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书目录页码与阅读进度
 // @namespace    https://github.com/0CalEmotion
-// @version      0.7.5
+// @version      0.7.8
 // @description  在微信读书网页版目录中显示章节页码，并在顶部显示当前阅读进度。
 // @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
@@ -519,12 +519,62 @@
 
     function getCurrentChapterTitle() {
         const titleNode = document.querySelector('.readerTopBar_title_chapter');
-        if (titleNode && titleNode.textContent.trim()) {
-            runtime.lastChapterTitle = titleNode.textContent.trim();
+        const visibleTitle = titleNode && titleNode.textContent.trim()
+            ? titleNode.textContent.trim()
+            : '';
+        const exactVisibleTitle = findKnownChapterTitle(visibleTitle, false);
+        if (exactVisibleTitle) {
+            runtime.lastChapterTitle = exactVisibleTitle;
             return runtime.lastChapterTitle;
         }
 
+        const selectedCatalogTitle = document.querySelector(
+            '.readerCatalog_list_item_selected .readerCatalog_list_item_title_text'
+        )?.textContent?.trim() || '';
+        const exactCatalogTitle = findKnownChapterTitle(selectedCatalogTitle, false);
+        if (exactCatalogTitle) {
+            runtime.lastChapterTitle = exactCatalogTitle;
+            return runtime.lastChapterTitle;
+        }
+
+        // 微信读书会把一组很短的小节放在同一个渲染章节中。此时顶栏显示
+        // 小节标题，而 document.title 仍保留接口返回的父章节标题。
+        const parentTitle = findKnownChapterTitle(document.title, true);
+        if (parentTitle) {
+            runtime.lastChapterTitle = parentTitle;
+            return runtime.lastChapterTitle;
+        }
+
+        if (runtime.lastChapterTitle && findKnownChapterTitle(runtime.lastChapterTitle, false)) {
+            return runtime.lastChapterTitle;
+        }
+
+        if (visibleTitle) {
+            runtime.lastChapterTitle = visibleTitle;
+        }
+
         return runtime.lastChapterTitle;
+    }
+
+    function findKnownChapterTitle(sourceText, allowContains) {
+        const normalizedSource = normalizeText(sourceText);
+        if (!normalizedSource || runtime.chapters.length === 0) {
+            return '';
+        }
+
+        const matches = runtime.chapters.filter((chapter) => {
+            const normalizedTitle = normalizeText(chapter.title);
+            if (!normalizedTitle) {
+                return false;
+            }
+
+            return allowContains
+                ? normalizedSource.includes(normalizedTitle)
+                : normalizedSource === normalizedTitle;
+        });
+
+        matches.sort((left, right) => normalizeText(right.title).length - normalizeText(left.title).length);
+        return matches[0] ? matches[0].title : '';
     }
 
     function measureCurrentChapter() {
