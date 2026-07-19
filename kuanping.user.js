@@ -2,7 +2,7 @@
 // @name         微信读书宽屏工具
 // @icon         https://weread.qq.com/favicon.ico
 // @namespace    https://greasyfork.org/users/878514
-// @version      20260719.17
+// @version      20260719.18
 // @description  调整滚动阅读宽度和目录位置，并为滚动、双栏阅读提供统一的自动阅读控件。
 // @author       Velens
 // @match        https://weread.qq.com/web/reader/*
