@@ -2,8 +2,8 @@
 // @name         微信读书宽屏改版
 // @icon         https://weread.qq.com/favicon.ico
 // @namespace    https://greasyfork.org/users/878514
-// @version      20260719.8
-// @description  调整滚动阅读宽度和目录位置，并为滚动、双栏阅读提供统一的书友想法和自动阅读控件。
+// @version      20260719.12
+// @description  调整滚动阅读宽度和目录位置，并为滚动、双栏阅读提供统一的自动阅读控件。
 // @author       Velens
 // @match        https://weread.qq.com/web/reader/*
 // @license      MIT
@@ -23,15 +23,20 @@
         { title: '宽列', width: '80%' },
         { title: '默认', width: '' }
     ];
+    const scrollbarOptions = [
+        { title: '滚动条：显示', display: 'auto', styled: true },
+        { title: '滚动条：隐藏', display: 'none', styled: false },
+        { title: '滚动条：默认', display: 'auto', styled: false }
+    ];
     const spaceAutoPlayOptions = ['开启', '关闭'];
     const CATALOG_SHIFT_MIN_PX = 0;
     const CATALOG_SHIFT_MAX_PX = 500;
-    const REVIEW_STATE_KEY = 'scrollShowBookReviews';
     const REVIEW_BATCH_SIZE = 12;
     const REVIEW_BATCH_DELAY_MS = 150;
     const REVIEW_CONTENT_STABLE_MS = 2200;
 
     let widthIndex = normalizeIndex(GM_getValue('numw', 0), widths.length);
+    let scrollbarIndex = normalizeIndex(GM_getValue('nums', 0), scrollbarOptions.length);
     let spaceIndex = normalizeIndex(GM_getValue('numSpace', 0), spaceAutoPlayOptions.length);
     let catalogShiftPx = clampNumber(
         GM_getValue('catalogShiftPx', 0),
@@ -87,6 +92,12 @@
                 transform: translateY(-50%) !important;
                 align-items: center !important;
                 gap: 0 !important;
+            }
+
+            .readerControls.readerControls.lv-reader-controls-scroll {
+                top: auto !important;
+                bottom: 48px !important;
+                transform: none !important;
             }
 
             .readerControls > .wr_tooltip_container,
@@ -198,6 +209,7 @@
         `);
 
         applyWidthStyle();
+        applyScrollbarStyle();
     }
 
     function registerMenus() {
@@ -206,6 +218,14 @@
             GM_setValue('numw', widthIndex);
             location.reload();
         });
+
+        if (!isHorizontalReader()) {
+            GM_registerMenuCommand(scrollbarOptions[scrollbarIndex].title, () => {
+                scrollbarIndex = (scrollbarIndex + 1) % scrollbarOptions.length;
+                GM_setValue('nums', scrollbarIndex);
+                location.reload();
+            });
+        }
 
         GM_registerMenuCommand(`目录横移：${catalogShiftPx}px`, () => {
             const input = prompt(
@@ -232,6 +252,41 @@
             GM_setValue('numSpace', spaceIndex);
             location.reload();
         });
+    }
+
+    function applyScrollbarStyle() {
+        if (isHorizontalReader()) {
+            return;
+        }
+
+        const option = scrollbarOptions[scrollbarIndex];
+        GM_addStyle(`body::-webkit-scrollbar { display: ${option.display}; }`);
+        if (option.display !== 'none') {
+            GM_addStyle(`
+                body:has(.readerCatalog:not([style*="display: none"]):not([style*="display:none"])) {
+                    overflow-y: scroll !important;
+                }
+            `);
+        }
+        if (!option.styled) {
+            return;
+        }
+
+        GM_addStyle(`
+            body::-webkit-scrollbar {
+                width: 6px;
+            }
+
+            body::-webkit-scrollbar-thumb {
+                border-radius: 10px;
+                box-shadow: inset 0 0 6px rgba(255, 255, 255, .4);
+            }
+
+            body.wr_whiteTheme::-webkit-scrollbar-thumb {
+                border-radius: 10px;
+                box-shadow: inset 0 0 6px rgba(0, 0, 0, .2);
+            }
+        `);
     }
 
     function applyWidthStyle() {
@@ -332,17 +387,24 @@
 
     function initReaderControls(controls) {
         const mode = isHorizontalReader() ? 'horizontal' : 'scroll';
+        controls.classList.toggle('lv-reader-controls-scroll', mode === 'scroll');
+        if (mode === 'scroll') {
+            hideNativeReviewControl(controls);
+        } else {
+            restoreNativeReviewControl(controls);
+        }
         if (initializedControls.get(controls) === mode) {
             return;
         }
 
         initializedControls.set(controls, mode);
         controls.querySelectorAll('.lv-reader-control').forEach((node) => node.remove());
-        restoreNativeReviewControl(controls);
         if (mode === 'horizontal') {
             initHorizontalAutoRead(controls);
         } else {
-            initScrollReviewToggle(controls);
+            reviewMarksEnabled = false;
+            cancelScrollReviewLoad();
+            hideScrollReviewMarks();
             initScrollAutoRead(controls);
         }
     }
@@ -421,51 +483,16 @@
         update();
     }
 
-    function initScrollReviewToggle(controls) {
-        const nativeButton = Array.from(controls.querySelectorAll('.showBookReviews, .showBookReviews_active'))
-            .find((node) => !node.classList.contains('lv-book-reviews'));
-        const nativeControl = nativeButton?.closest('.wr_tooltip_container') || nativeButton;
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'readerControls_item showBookReviews lv-reader-control lv-book-reviews';
-        button.innerHTML = '<span class="icon"></span>';
-        const modeButton = controls.querySelector('.isHorizontalReader');
-        const modeControl = modeButton?.closest('.wr_tooltip_container') || modeButton;
-        if (nativeControl && nativeControl.parentElement === controls) {
-            nativeControl.dataset.lvNativeReviewHidden = 'true';
-            nativeControl.style.display = 'none';
-            controls.insertBefore(button, nativeControl);
-        } else if (modeControl && modeControl.parentElement === controls) {
-            controls.insertBefore(button, modeControl);
-        } else {
-            controls.appendChild(button);
-        }
-
-        let enabled = Boolean(GM_getValue(REVIEW_STATE_KEY, false));
-        const render = () => {
-            button.classList.toggle('showBookReviews', !enabled);
-            button.classList.toggle('showBookReviews_active', enabled);
-            button.title = enabled ? '关闭书友想法' : '开启书友想法';
-            button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-        };
-
-        button.addEventListener('click', () => {
-            enabled = !enabled;
-            reviewMarksEnabled = enabled;
-            reviewMarksChapterKey = '';
-            GM_setValue(REVIEW_STATE_KEY, enabled);
-            render();
-            if (!enabled) {
-                cancelScrollReviewLoad();
-                hideScrollReviewMarks();
+    function hideNativeReviewControl(controls) {
+        controls.querySelectorAll('.showBookReviews, .showBookReviews_active').forEach((button) => {
+            const nativeControl = button.closest('.wr_tooltip_container') || button;
+            if (nativeControl.parentElement !== controls
+                || nativeControl.dataset.lvNativeReviewHidden === 'true') {
                 return;
             }
-            refreshScrollReviewMarks(true);
+            nativeControl.dataset.lvNativeReviewHidden = 'true';
+            nativeControl.style.setProperty('display', 'none', 'important');
         });
-
-        reviewMarksEnabled = enabled;
-        refreshScrollReviewMarks(true);
-        render();
     }
 
     function restoreNativeReviewControl(controls) {
