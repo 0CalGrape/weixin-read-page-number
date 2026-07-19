@@ -2,7 +2,7 @@
 // @name         微信读书宽屏工具
 // @icon         https://weread.qq.com/favicon.ico
 // @namespace    https://greasyfork.org/users/878514
-// @version      20260719.15
+// @version      20260719.17
 // @description  调整滚动阅读宽度和目录位置，并为滚动、双栏阅读提供统一的自动阅读控件。
 // @author       Velens
 // @match        https://weread.qq.com/web/reader/*
@@ -523,15 +523,22 @@
         controls.append(toggleButton, speedButton);
 
         let playing = false;
-        let intervalId = 0;
+        let animationFrameId = 0;
+        let lastFrameTime = 0;
         let stopTimer = 0;
         let pageTimer = 0;
         let toggleClickTimer = 0;
         let speedClickTimer = 0;
         let pageTurnScheduled = false;
         let topHoldUntil = 0;
-        let scrollStep = clampNumber(GM_getValue('ynumDown', 1), -1000, 1000, 1);
-        let intervalMs = clampNumber(GM_getValue('timeMillisec', 20), 1, Number.MAX_SAFE_INTEGER, 20);
+        const legacyScrollStep = clampNumber(GM_getValue('ynumDown', 1), -1000, 1000, 1);
+        const legacyIntervalMs = clampNumber(GM_getValue('timeMillisec', 20), 1, Number.MAX_SAFE_INTEGER, 20);
+        let scrollPixelsPerSecond = clampNumber(
+            GM_getValue('scrollPixelsPerSecond', legacyScrollStep * 1000 / legacyIntervalMs),
+            -10000,
+            10000,
+            50
+        );
         let pageDelayMs = clampNumber(GM_getValue('timePagesec', 10000), 1000, Number.MAX_SAFE_INTEGER, 10000);
         let topDelayMs = clampNumber(GM_getValue('timeTopsec', 0), 0, Number.MAX_SAFE_INTEGER, 0);
 
@@ -540,25 +547,31 @@
             toggleButton.title = playing
                 ? `时长：${timeStopMinutes}（双击修改）`
                 : `停留：${topDelayMs}（双击修改）`;
-            speedButton.title = `步长，间隔：${scrollStep}，${intervalMs}（双击改翻页）`;
+            speedButton.title = `速度：${scrollPixelsPerSecond} 像素/秒（按屏幕刷新率平滑执行；双击改翻页）`;
         };
         const stop = () => {
             playing = false;
             pageTurnScheduled = false;
-            window.clearInterval(intervalId);
+            window.cancelAnimationFrame(animationFrameId);
             window.clearTimeout(stopTimer);
             window.clearTimeout(pageTimer);
-            intervalId = 0;
+            animationFrameId = 0;
+            lastFrameTime = 0;
             stopTimer = 0;
             pageTimer = 0;
             update();
         };
-        const tick = () => {
+        const tick = (frameTime) => {
             if (!document.contains(controls) || isHorizontalReader()) {
                 stop();
                 return;
             }
 
+            if (!lastFrameTime) {
+                lastFrameTime = frameTime;
+            }
+            const elapsedMs = Math.min(Math.max(frameTime - lastFrameTime, 0), 100);
+            lastFrameTime = frameTime;
             const scrollTop = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
             const scrollHeight = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)
                 - (window.innerHeight || document.documentElement.clientHeight || 0);
@@ -568,14 +581,16 @@
                     topHoldUntil = Date.now() + topDelayMs;
                 }
                 if (Date.now() < topHoldUntil) {
+                    animationFrameId = window.requestAnimationFrame(tick);
                     return;
                 }
             } else {
                 topHoldUntil = 0;
             }
 
-            window.scrollBy(0, scrollStep);
-            if (scrollTop >= scrollHeight - 10) {
+            window.scrollBy(0, scrollPixelsPerSecond * elapsedMs / 1000);
+            const nextScrollTop = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+            if (nextScrollTop >= scrollHeight - 10) {
                 if (!pageTurnScheduled) {
                     pageTurnScheduled = true;
                     pageTimer = window.setTimeout(dispatchArrowRight, pageDelayMs);
@@ -584,14 +599,16 @@
                 pageTurnScheduled = false;
                 window.clearTimeout(pageTimer);
             }
+            animationFrameId = window.requestAnimationFrame(tick);
         };
         const start = () => {
             playing = true;
             pageTurnScheduled = false;
             topHoldUntil = 0;
-            window.clearInterval(intervalId);
+            lastFrameTime = 0;
+            window.cancelAnimationFrame(animationFrameId);
             window.clearTimeout(stopTimer);
-            intervalId = window.setInterval(tick, intervalMs);
+            animationFrameId = window.requestAnimationFrame(tick);
             if (timeStopMinutes > 0) {
                 stopTimer = window.setTimeout(stop, timeStopMinutes * 60000);
             }
@@ -624,27 +641,23 @@
             window.clearTimeout(speedClickTimer);
             speedClickTimer = window.setTimeout(() => {
                 const input = prompt(
-                    '请输入滚动步长（像素），调用间隔（毫秒）（默认：1,20）',
-                    `${scrollStep},${intervalMs}`
+                    '请输入每秒滚动的像素数（例如：12.5）',
+                    String(scrollPixelsPerSecond)
                 );
                 if (input === null) {
                     return;
                 }
 
-                const values = input.split(/[,，]/, 2).map((value) => Number(value.trim()));
-                if (values.length !== 2 || !values.every(Number.isFinite) || values[1] < 1) {
-                    alert('请输入“步长,间隔”，例如：1,20。');
+                const value = Number(input.trim());
+                if (!Number.isFinite(value)) {
+                    alert('请输入每秒滚动的像素数，例如：12.5。');
                     return;
                 }
 
-                const oldInterval = intervalMs;
-                scrollStep = clamp(values[0], -1000, 1000);
-                intervalMs = Math.max(1, values[1]);
-                GM_setValue('ynumDown', scrollStep);
-                GM_setValue('timeMillisec', intervalMs);
-                if (playing && intervalMs !== oldInterval) {
-                    window.clearInterval(intervalId);
-                    intervalId = window.setInterval(tick, intervalMs);
+                scrollPixelsPerSecond = clamp(value, -10000, 10000);
+                GM_setValue('scrollPixelsPerSecond', scrollPixelsPerSecond);
+                if (playing) {
+                    lastFrameTime = 0;
                 }
                 update();
             }, 250);
