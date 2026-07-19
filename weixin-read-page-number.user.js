@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书目录页码与阅读进度
 // @namespace    https://github.com/0CalEmotion
-// @version      0.9.3
+// @version      0.9.4
 // @description  在微信读书网页版目录中显示章节页码，并在滚动、双栏阅读模式顶部显示当前阅读进度。
 // @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
@@ -919,7 +919,7 @@
         const safeCurrentPage = clamp(Number(currentPage || 1), 1, safePageCount);
         const pageProgress = safeCurrentPage - 1;
         const scrollProgress = clamp(Number(scrollProgressRatio || 0), 0, 1);
-        return Math.round(clamp((pageProgress + scrollProgress) / safePageCount, 0, 1) * 100);
+        return (clamp((pageProgress + scrollProgress) / safePageCount, 0, 1) * 100).toFixed(1);
     }
 
     function getBookProgressPercent(currentPage, totalPages, scrollProgressRatio) {
