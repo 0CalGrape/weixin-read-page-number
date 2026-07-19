@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         微信读书宽屏改版
+// @name         微信读书宽屏工具
 // @icon         https://weread.qq.com/favicon.ico
 // @namespace    https://greasyfork.org/users/878514
 // @version      20260719.14
