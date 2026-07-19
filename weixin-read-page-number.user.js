@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书目录页码与阅读进度
 // @namespace    https://github.com/0CalEmotion
-// @version      0.9.4
+// @version      0.9.5
 // @description  在微信读书网页版目录中显示章节页码，并在滚动、双栏阅读模式顶部显示当前阅读进度。
 // @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
