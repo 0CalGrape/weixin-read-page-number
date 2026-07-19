@@ -35,7 +35,7 @@
     const REVIEW_BATCH_DELAY_MS = 150;
     const REVIEW_CONTENT_STABLE_MS = 2200;
 
-    let widthIndex = normalizeIndex(GM_getValue('numw', 0), widths.length);
+    let widthIndex = normalizeIndex(GM_getValue('numw', 1), widths.length);
     let scrollbarIndex = normalizeIndex(GM_getValue('nums', 0), scrollbarOptions.length);
     let spaceIndex = normalizeIndex(GM_getValue('numSpace', 0), spaceAutoPlayOptions.length);
     let catalogShiftPx = clampNumber(
