@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微信读书目录页码与阅读进度
 // @namespace    https://github.com/0CalEmotion
-// @version      0.9.6
-// @description  在微信读书网页版目录中显示章节页码，并在滚动、双栏阅读模式顶部显示当前阅读进度。
+// @version      1.0
+// @description  在微信读书网页版目录中显示章节页码，并在顶部显示当前阅读进度。
 // @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
 // @run-at       document-idle
@@ -13,8 +13,8 @@
 (function () {
     'use strict';
 
-    const HORIZONTAL_PAGE_STEP = 2;
-    const TRACKER_PREFIX = 'lv-weread-page-tracker:v12:';
+    const DEFAULT_WORDS_PER_PAGE = 10000;
+    const TRACKER_PREFIX = 'lv-weread-page-tracker:v9:';
 
     const runtime = {
         observer: null,
@@ -29,8 +29,7 @@
         pendingCatalogJump: null,
         activeChapterKey: '',
         pageTurnIntent: null,
-        chapterTurnIntent: null,
-        chapterEntryDirection: null
+        chapterTurnIntent: null
     };
 
     bootstrap();
@@ -131,10 +130,6 @@
                 min-width: 0;
                 flex: 1 1 auto;
             }
-
-            .wr_horizontalReader .lv-top-progress {
-                margin: 0 12px;
-            }
         `;
 
         if (typeof GM_addStyle === 'function') {
@@ -194,23 +189,14 @@
                 return;
             }
 
-            const horizontal = Boolean(document.querySelector('.wr_horizontalReader'));
-            capturePageTurnIntent(
-                direction > 0 ? 'forward' : 'backward',
-                horizontal ? getHorizontalTurnOptions() : {}
-            );
+            capturePageTurnIntent(direction > 0 ? 'forward' : 'backward');
         }, { passive: true });
 
         window.addEventListener('keydown', (event) => {
             const key = String(event.key || '');
-            const horizontal = Boolean(document.querySelector('.wr_horizontalReader'));
-            if (horizontal && key === 'ArrowRight') {
-                capturePageTurnIntent('forward', getHorizontalTurnOptions());
-            } else if (horizontal && key === 'ArrowLeft') {
-                capturePageTurnIntent('backward', getHorizontalTurnOptions());
-            } else if (!horizontal && (key === 'PageDown' || key === 'ArrowDown')) {
+            if (key === 'PageDown' || key === 'ArrowDown' || key === ' ' || key === 'Spacebar') {
                 capturePageTurnIntent('forward');
-            } else if (!horizontal && (key === 'PageUp' || key === 'ArrowUp')) {
+            } else if (key === 'PageUp' || key === 'ArrowUp') {
                 capturePageTurnIntent('backward');
             }
         }, true);
@@ -225,22 +211,11 @@
             if (pageTurnButton) {
                 const text = (pageTurnButton.textContent || '').trim();
                 if (text.includes('下一页')) {
-                    const horizontal = Boolean(document.querySelector('.wr_horizontalReader'));
-                    capturePageTurnIntent('forward', {
-                        force: true,
-                        optimistic: true,
-                        allowExtend: true,
-                        pageStep: horizontal ? HORIZONTAL_PAGE_STEP : 1
-                    });
+                    capturePageTurnIntent('forward', { force: true, optimistic: true, allowExtend: true });
                     return;
                 }
                 if (text.includes('上一页')) {
-                    const horizontal = Boolean(document.querySelector('.wr_horizontalReader'));
-                    capturePageTurnIntent('backward', {
-                        force: true,
-                        optimistic: true,
-                        pageStep: horizontal ? HORIZONTAL_PAGE_STEP : 1
-                    });
+                    capturePageTurnIntent('backward', { force: true, optimistic: true });
                     return;
                 }
                 if (text.includes('下一章')) {
@@ -272,33 +247,15 @@
             const nearBottom = Boolean(measurement.nearBottom);
 
             if (nearBottom) {
-                capturePageTurnIntent('forward', measurement.isHorizontal ? getHorizontalTurnOptions() : {});
+                capturePageTurnIntent('forward');
             } else if (nearTop) {
-                capturePageTurnIntent('backward', measurement.isHorizontal ? getHorizontalTurnOptions() : {});
+                capturePageTurnIntent('backward');
             }
         }, true);
     }
 
-    function getHorizontalTurnOptions() {
-        return {
-            force: true,
-            optimistic: true,
-            allowExtend: true,
-            pageStep: HORIZONTAL_PAGE_STEP,
-            debounceMs: 600
-        };
-    }
-
     function capturePageTurnIntent(direction, options = {}) {
         if (!isReaderPage()) {
-            return;
-        }
-
-        const now = Date.now();
-        const debounceMs = Math.max(0, Number(options.debounceMs || 180));
-        if (runtime.pageTurnIntent
-            && runtime.pageTurnIntent.direction === direction
-            && now - Number(runtime.pageTurnIntent.at || 0) < debounceMs) {
             return;
         }
 
@@ -321,9 +278,6 @@
             return;
         }
 
-        const previousPage = options.optimistic
-            ? getTrackedCurrentPage(chapterTitle)
-            : 0;
         const expectedPage = options.optimistic
             ? applyImmediatePageTurn(direction, chapterTitle, measurement, options)
             : 0;
@@ -331,23 +285,10 @@
         runtime.pageTurnIntent = {
             direction,
             chapterKey: normalizeText(chapterTitle),
-            at: now,
+            at: Date.now(),
             optimisticApplied: Boolean(expectedPage > 0),
-            expectedPage: Number(expectedPage || 0),
-            previousPage: Number(previousPage || 0)
+            expectedPage: Number(expectedPage || 0)
         };
-    }
-
-    function getTrackedCurrentPage(chapterTitle) {
-        const chapter = runtime.chapters.find(
-            (item) => normalizeText(item.title) === normalizeText(chapterTitle)
-        );
-        if (!chapter) {
-            return 1;
-        }
-        const trackerKey = chapter.chapterUid || normalizeText(chapter.title);
-        const tracker = runtime.chapterTrackers.get(trackerKey) || readTracker(trackerKey);
-        return Math.max(1, Number(tracker?.currentPage || 1));
     }
 
     function applyImmediatePageTurn(direction, chapterTitle, measurement, options = {}) {
@@ -363,8 +304,8 @@
 
         const trackerKey = chapter.chapterUid || normalizeText(chapter.title);
         const tracker = runtime.chapterTrackers.get(trackerKey) || readTracker(trackerKey) || {
-            currentPage: measurement.isHorizontal ? HORIZONTAL_PAGE_STEP : 1,
-            maxPage: measurement.isHorizontal ? HORIZONTAL_PAGE_STEP : 1,
+            currentPage: 1,
+            maxPage: 1,
             currentTopSignature: '',
             signatureMap: {},
             lastScrollTop: Number(measurement.scrollTop || 0),
@@ -373,17 +314,15 @@
         };
         const pageCount = Math.max(1, Number(chapter.pageCount || 1), Number(tracker.maxPage || 1));
         const currentPage = Math.max(1, Number(tracker.currentPage || 1));
-        const pageStep = Math.max(1, Number(options.pageStep || 1));
 
         if (direction === 'forward' && currentPage < pageCount) {
-            tracker.currentPage = Math.min(pageCount, currentPage + pageStep);
+            tracker.currentPage = currentPage + 1;
             tracker.maxPage = Math.max(Number(tracker.maxPage || 1), tracker.currentPage);
         } else if (direction === 'forward' && options.allowExtend) {
-            tracker.currentPage = currentPage + pageStep;
+            tracker.currentPage = currentPage + 1;
             tracker.maxPage = Math.max(Number(tracker.maxPage || 1), tracker.currentPage);
-            tracker.finalized = false;
         } else if (direction === 'backward' && currentPage > 1) {
-            tracker.currentPage = Math.max(1, currentPage - pageStep);
+            tracker.currentPage = currentPage - 1;
         } else {
             return 0;
         }
@@ -494,17 +433,10 @@
         const chapterTitle = getCurrentChapterTitle();
         const chapterKey = normalizeText(chapterTitle);
         if (chapterKey && chapterKey !== runtime.activeChapterKey) {
-            if (runtime.activeChapterKey && runtime.pageTurnIntent?.direction === 'forward') {
-                finalizeExitedChapter(runtime.pageTurnIntent);
-            }
-            runtime.chapterEntryDirection = runtime.activeChapterKey
-                ? runtime.pageTurnIntent?.direction || null
-                : null;
             runtime.activeChapterKey = chapterKey;
             runtime.pageTurnIntent = null;
         }
         const measurement = measureCurrentChapter();
-        syncMeasuredChapterPages(chapterTitle, measurement);
         const pagination = buildPagination(runtime.chapters);
         const current = buildCurrentProgress(pagination, chapterTitle, measurement);
         if (!current) {
@@ -529,74 +461,6 @@
         runtime.lastSignature = signature;
         renderCatalogPages(pagination, current);
         renderTopProgress(current);
-    }
-
-    function syncMeasuredChapterPages(chapterTitle, measurement) {
-        if (!chapterTitle || !measurement) {
-            return;
-        }
-        const chapter = runtime.chapters.find(
-            (item) => normalizeText(item.title) === normalizeText(chapterTitle)
-        );
-        if (!chapter) {
-            return;
-        }
-
-        const trackerKey = chapter.chapterUid || normalizeText(chapter.title);
-        const tracker = runtime.chapterTrackers.get(trackerKey) || readTracker(trackerKey) || {
-            currentPage: measurement.isHorizontal ? HORIZONTAL_PAGE_STEP : 1,
-            maxPage: measurement.isHorizontal ? HORIZONTAL_PAGE_STEP : 1,
-            currentTopSignature: '',
-            signatureMap: {},
-            lastScrollTop: 0,
-            initialized: true,
-            maxSeenScrollTopThisPage: 0
-        };
-
-        if (measurement.isHorizontal) {
-            const exactPageCount = Math.max(0, Number(tracker.exactPageCount || 0));
-            const discoveredPageCount = Math.max(HORIZONTAL_PAGE_STEP, Number(tracker.maxPage || 1));
-            const resolvedPageCount = exactPageCount || discoveredPageCount;
-            const currentPage = Math.max(
-                HORIZONTAL_PAGE_STEP,
-                Math.ceil(Number(tracker.currentPage || 1) / HORIZONTAL_PAGE_STEP) * HORIZONTAL_PAGE_STEP
-            );
-            tracker.currentPage = Math.min(resolvedPageCount, currentPage);
-            tracker.maxPage = Math.max(resolvedPageCount, tracker.currentPage);
-        } else {
-            const exactPageCount = Math.max(1, Number(measurement.pageCount || 1));
-            tracker.currentPage = clamp(Number(measurement.currentPage || 1), 1, exactPageCount);
-            tracker.maxPage = exactPageCount;
-            tracker.exactPageCount = exactPageCount;
-            tracker.finalized = true;
-        }
-
-        tracker.initialized = true;
-        runtime.chapterTrackers.set(trackerKey, tracker);
-        writeTracker(trackerKey, tracker);
-    }
-
-    function finalizeExitedChapter(intent) {
-        const chapter = runtime.chapters.find(
-            (item) => normalizeText(item.title) === String(intent?.chapterKey || '')
-        );
-        if (!chapter) {
-            return;
-        }
-
-        const trackerKey = chapter.chapterUid || normalizeText(chapter.title);
-        const tracker = runtime.chapterTrackers.get(trackerKey) || readTracker(trackerKey);
-        if (!tracker) {
-            return;
-        }
-
-        const previousPage = Math.max(1, Number(intent.previousPage || tracker.currentPage || 1));
-        const finalPageCount = Math.max(1, Number(tracker.exactPageCount || previousPage));
-        tracker.currentPage = finalPageCount;
-        tracker.maxPage = finalPageCount;
-        tracker.finalized = true;
-        runtime.chapterTrackers.set(trackerKey, tracker);
-        writeTracker(trackerKey, tracker);
     }
 
     function isReaderPage() {
@@ -714,10 +578,6 @@
     }
 
     function measureCurrentChapter() {
-        if (document.querySelector('.wr_horizontalReader')) {
-            return measureHorizontalChapter();
-        }
-
         const renderNode = document.querySelector('.renderTargetContent')
             || document.querySelector('.readerChapterContent')
             || document.querySelector('.wr_canvasContainer');
@@ -761,104 +621,13 @@
         };
     }
 
-    function measureHorizontalChapter() {
-        const chapterNode = document.querySelector('.readerChapterContent');
-        const renderNode = document.querySelector('.renderTargetContent');
-        const canvasNode = document.querySelector('.wr_canvasContainer');
-        if (!chapterNode || (!renderNode && !canvasNode)) {
-            return null;
-        }
-
-        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-        if (!viewportHeight) {
-            return null;
-        }
-
-        const wrappers = renderNode
-            ? Array.from(renderNode.querySelectorAll(':scope > .contentWrapper'))
-            : [];
-        const visibleWrapperIndexes = wrappers
-            .map((wrapper, index) => getComputedStyle(wrapper).display !== 'none' ? index : -1)
-            .filter((index) => index >= 0);
-        const visibleWrapperHtml = visibleWrapperIndexes
-            .map((index) => wrappers[index] ? wrappers[index].innerHTML : '')
-            .join('|');
-        const headerTitles = Array.from(document.querySelectorAll('.renderTargetPageInfo_header_chapterTitle'))
-            .map((node) => normalizeText(node.textContent || ''))
-            .filter(Boolean)
-            .join('|');
-        const selectedTitle = normalizeText(
-            document.querySelector('.readerCatalog_list_item_selected .readerCatalog_list_item_title_text')
-                ?.textContent || ''
-        );
-        const trackerSignature = [
-            'horizontal',
-            visibleWrapperIndexes.join(','),
-            headerTitles,
-            selectedTitle,
-            simpleHash(visibleWrapperHtml),
-            getHorizontalCanvasSignature(canvasNode)
-        ].join('|');
-
-        return {
-            totalHeight: viewportHeight,
-            viewportHeight,
-            pageCount: 1,
-            currentPage: 1,
-            progressRatio: 1,
-            scrollProgressRatio: 1,
-            scrollTop: 0,
-            contentSignature: trackerSignature,
-            trackerSignature,
-            nearBottom: true,
-            isHorizontal: true
-        };
-    }
-
-    function getHorizontalCanvasSignature(canvasNode) {
-        if (!canvasNode) {
-            return 'no-canvas';
-        }
-
-        const canvases = Array.from(canvasNode.querySelectorAll('canvas'))
-            .filter((canvas) => {
-                const rect = canvas.getBoundingClientRect();
-                return rect.width > 0 && rect.height > 0;
-            });
-        if (canvases.length === 0) {
-            return 'empty-canvas';
-        }
-
-        try {
-            const sampleSize = 32;
-            const sample = document.createElement('canvas');
-            sample.width = sampleSize * canvases.length;
-            sample.height = sampleSize;
-            const context = sample.getContext('2d', { willReadFrequently: true });
-            if (!context) {
-                return `canvas-${canvases.length}`;
-            }
-
-            canvases.forEach((canvas, index) => {
-                context.drawImage(canvas, index * sampleSize, 0, sampleSize, sampleSize);
-            });
-
-            const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
-            let hash = 0;
-            for (let index = 0; index < pixels.length; index += 1) {
-                hash = ((hash << 5) - hash + pixels[index]) | 0;
-            }
-            return `${canvases.length}:${hash}`;
-        } catch (error) {
-            return canvases.map((canvas) => `${canvas.width}x${canvas.height}`).join('|');
-        }
-    }
-
     function buildPagination(chapters) {
+        const wordsPerPage = DEFAULT_WORDS_PER_PAGE;
+
         let startPage = 1;
 
         return chapters.map((chapter) => {
-            const pageCount = getChapterPageCount(chapter);
+            const pageCount = getChapterPageCount(chapter, wordsPerPage);
 
             const item = {
                 ...chapter,
@@ -930,16 +699,34 @@
         return (clamp((pageProgress + scrollProgress) / safeTotalPages, 0, 1) * 100).toFixed(2);
     }
 
-    function getChapterPageCount(chapter) {
+    function getChapterPageCount(chapter, wordsPerPage) {
         const trackerKey = chapter && (chapter.chapterUid || normalizeText(chapter.title));
-        const tracker = trackerKey
-            ? runtime.chapterTrackers.get(trackerKey) || readTracker(trackerKey)
-            : null;
-        return Math.max(
-            1,
-            Number(tracker?.exactPageCount || 0),
-            Number(tracker?.maxPage || 0)
-        );
+        const tracker = trackerKey ? readTracker(trackerKey) : null;
+        return Math.max(estimatePageCount(chapter, wordsPerPage), Number(tracker && tracker.maxPage || 1));
+    }
+
+    function estimatePageCount(chapter, wordsPerPage) {
+        if (!chapter) {
+            return 1;
+        }
+
+        if (chapter.title === '封面') {
+            return 1;
+        }
+
+        if (chapter.title.indexOf('版权信息') >= 0) {
+            return 1;
+        }
+
+        if (chapter.wordCount <= 0) {
+            return 1;
+        }
+
+        if (chapter.wordCount <= 500) {
+            return 1;
+        }
+
+        return Math.max(1, Math.ceil(chapter.wordCount / Math.max(wordsPerPage, 1)));
     }
 
     function renderCatalogPages(pagination, current) {
@@ -1035,60 +822,124 @@
     }
 
     function getChapterProgress(chapter, measurement) {
-        const pageCount = Math.max(1, Number(chapter.pageCount || 1));
-        if (!measurement.isHorizontal) {
-            const ratio = clamp(Number(measurement.scrollProgressRatio || 0), 0, 1);
-            const currentPage = clamp(
-                Number(measurement.currentPage || 1),
-                1,
-                pageCount
-            );
-            return {
-                currentPage,
-                overallRatio: ratio,
-                segmentIndex: currentPage,
-                segmentCount: pageCount
-            };
-        }
-
         const trackerKey = chapter.chapterUid || normalizeText(chapter.title);
-        const tracker = runtime.chapterTrackers.get(trackerKey) || readTracker(trackerKey) || {
-            currentPage: Math.min(pageCount, HORIZONTAL_PAGE_STEP),
-            maxPage: Math.max(pageCount, HORIZONTAL_PAGE_STEP),
+        const storedTracker = readTracker(trackerKey);
+        const tracker = runtime.chapterTrackers.get(trackerKey) || storedTracker || {
+            currentPage: 1,
+            maxPage: 1,
             currentTopSignature: '',
             signatureMap: {},
-            lastScrollTop: 0,
-            initialized: true,
-            maxSeenScrollTopThisPage: 0
+            lastScrollTop: Number(measurement.scrollTop || 0),
+            initialized: false,
+            maxSeenScrollTopThisPage: Number(measurement.scrollTop || 0)
         };
+        const viewportHeight = Math.max(1, Number(measurement.viewportHeight || window.innerHeight || 1));
+        const scrollTop = Math.max(0, Number(measurement.scrollTop || 0));
+        const nearTop = scrollTop <= Math.max(140, viewportHeight * 0.35);
+        const signature = String(measurement.trackerSignature || '');
         const pendingCatalogJump = runtime.pendingCatalogJump
             && runtime.pendingCatalogJump.title === normalizeText(chapter.title)
             && Date.now() - Number(runtime.pendingCatalogJump.at || 0) <= 5000;
-
-        if (pendingCatalogJump) {
-            tracker.currentPage = Math.min(pageCount, HORIZONTAL_PAGE_STEP);
-            runtime.pendingCatalogJump = null;
-            runtime.chapterEntryDirection = null;
-        } else if (runtime.chapterEntryDirection) {
-            tracker.currentPage = runtime.chapterEntryDirection === 'backward'
-                ? pageCount
-                : Math.min(pageCount, HORIZONTAL_PAGE_STEP);
-            runtime.chapterEntryDirection = null;
+        const pendingTurnIntent = runtime.pageTurnIntent
+            && runtime.pageTurnIntent.chapterKey === normalizeText(chapter.title)
+            && Date.now() - Number(runtime.pageTurnIntent.at || 0) <= 2500
+            ? runtime.pageTurnIntent
+            : null;
+        const pendingChapterTurn = runtime.chapterTurnIntent
+            && runtime.chapterTurnIntent.targetChapterKey === normalizeText(chapter.title)
+            && Date.now() - Number(runtime.chapterTurnIntent.at || 0) <= 5000
+            ? runtime.chapterTurnIntent
+            : null;
+        if (!tracker.signatureMap || typeof tracker.signatureMap !== 'object') {
+            tracker.signatureMap = {};
         }
 
-        tracker.currentPage = clamp(Number(tracker.currentPage || 1), 1, Math.max(pageCount, Number(tracker.maxPage || 1)));
-        tracker.maxPage = Math.max(pageCount, Number(tracker.maxPage || 1), Number(tracker.currentPage || 1));
-        tracker.initialized = true;
+        if (!tracker.initialized) {
+            tracker.initialized = true;
+            tracker.currentPage = Math.max(1, Number(tracker.currentPage || 1));
+            tracker.maxPage = Math.max(1, Number(tracker.maxPage || tracker.currentPage || 1));
+            tracker.maxSeenScrollTopThisPage = scrollTop;
+            if (nearTop && signature) {
+                tracker.currentTopSignature = signature;
+                tracker.signatureMap[signature] = tracker.currentPage;
+            }
+        } else {
+            tracker.maxSeenScrollTopThisPage = Math.max(
+                Number(tracker.maxSeenScrollTopThisPage || 0),
+                scrollTop
+            );
+
+            if (nearTop && signature) {
+                const knownPage = Number(tracker.signatureMap[signature] || 0);
+                const hasKnownTopSignature = Boolean(tracker.currentTopSignature);
+                const sameTopSignature = hasKnownTopSignature && signature === tracker.currentTopSignature;
+                const changedTopSignature = hasKnownTopSignature && signature !== tracker.currentTopSignature;
+
+                if (pendingCatalogJump) {
+                    tracker.currentPage = 1;
+                    tracker.maxPage = Math.max(Number(tracker.maxPage || 1), 1);
+                    tracker.currentTopSignature = signature;
+                    tracker.signatureMap[signature] = 1;
+                    tracker.maxSeenScrollTopThisPage = scrollTop;
+                    runtime.pendingCatalogJump = null;
+                } else if (pendingChapterTurn) {
+                    const resolvedPageCount = Math.max(
+                        1,
+                        Number(chapter.pageCount || 1),
+                        Number(tracker.maxPage || 1),
+                        Number(pendingChapterTurn.targetPage || 1)
+                    );
+                    tracker.currentPage = pendingChapterTurn.direction === 'backward'
+                        ? resolvedPageCount
+                        : 1;
+                    tracker.maxPage = Math.max(Number(tracker.maxPage || 1), resolvedPageCount);
+                    tracker.currentTopSignature = signature;
+                    tracker.signatureMap[signature] = tracker.currentPage;
+                    tracker.maxSeenScrollTopThisPage = scrollTop;
+                    runtime.chapterTurnIntent = null;
+                } else if (changedTopSignature && pendingTurnIntent) {
+                    const expectedPage = Number(pendingTurnIntent.expectedPage || 0);
+                    if (expectedPage > 0) {
+                        tracker.currentPage = expectedPage;
+                    } else if (!pendingTurnIntent.optimisticApplied) {
+                        if (pendingTurnIntent.direction === 'forward') {
+                            tracker.currentPage = Math.max(1, Number(tracker.currentPage || 1) + 1);
+                        } else {
+                            tracker.currentPage = Math.max(1, Number(tracker.currentPage || 1) - 1);
+                        }
+                    }
+                    tracker.maxPage = Math.max(Number(tracker.maxPage || 1), Number(tracker.currentPage || 1));
+                    tracker.currentTopSignature = signature;
+                    tracker.signatureMap[signature] = tracker.currentPage;
+                    tracker.maxSeenScrollTopThisPage = scrollTop;
+                    runtime.pageTurnIntent = null;
+                } else if (knownPage > 0) {
+                    tracker.currentPage = knownPage;
+                    tracker.maxPage = Math.max(Number(tracker.maxPage || 1), knownPage);
+                    tracker.currentTopSignature = signature;
+                    tracker.maxSeenScrollTopThisPage = scrollTop;
+                } else if (!hasKnownTopSignature || sameTopSignature) {
+                    tracker.currentTopSignature = signature;
+                    tracker.signatureMap[signature] = Number(tracker.currentPage || 1);
+                    tracker.maxSeenScrollTopThisPage = scrollTop;
+                }
+            }
+        }
+
+        tracker.lastScrollTop = scrollTop;
+
         runtime.chapterTrackers.set(trackerKey, tracker);
         writeTracker(trackerKey, tracker);
 
-        const resolvedPageCount = Math.max(pageCount, Number(tracker.maxPage || 1));
-        const currentPage = clamp(Number(tracker.currentPage || 1), 1, resolvedPageCount);
+        const pageCount = Math.max(1, chapter.pageCount, Number(tracker.maxPage || 1));
+        const currentPage = clamp(Number(tracker.currentPage || 1), 1, pageCount);
+        const overallRatio = clamp(currentPage / pageCount, 0, 1);
+
         return {
             currentPage,
-            overallRatio: currentPage / resolvedPageCount,
+            overallRatio,
             segmentIndex: currentPage,
-            segmentCount: resolvedPageCount
+            segmentCount: pageCount
         };
     }
 
@@ -1111,9 +962,7 @@
                 signatureMap: tracker.signatureMap || {},
                 lastScrollTop: Number(tracker.lastScrollTop || 0),
                 initialized: Boolean(tracker.initialized),
-                maxSeenScrollTopThisPage: Number(tracker.maxSeenScrollTopThisPage || 0),
-                finalized: Boolean(tracker.finalized),
-                exactPageCount: Math.max(0, Number(tracker.exactPageCount || 0))
+                maxSeenScrollTopThisPage: Number(tracker.maxSeenScrollTopThisPage || 0)
             });
 
             window.localStorage.setItem(
