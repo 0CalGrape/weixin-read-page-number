@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书目录页码与阅读进度
 // @namespace    https://github.com/0CalEmotion
-// @version      1.0
+// @version      1.0.1
 // @description  在微信读书网页版目录中显示章节页码，并在顶部显示当前阅读进度。
 // @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const DEFAULT_WORDS_PER_PAGE = 10000;
-    const TRACKER_PREFIX = 'lv-weread-page-tracker:v9:';
+    const TRACKER_PREFIX = 'lv-weread-page-tracker:v13:';
 
     const runtime = {
         observer: null,
@@ -437,6 +437,7 @@
             runtime.pageTurnIntent = null;
         }
         const measurement = measureCurrentChapter();
+        syncMeasuredChapterPages(chapterTitle, measurement);
         const pagination = buildPagination(runtime.chapters);
         const current = buildCurrentProgress(pagination, chapterTitle, measurement);
         if (!current) {
@@ -461,6 +462,32 @@
         runtime.lastSignature = signature;
         renderCatalogPages(pagination, current);
         renderTopProgress(current);
+    }
+
+    function syncMeasuredChapterPages(chapterTitle, measurement) {
+        if (!chapterTitle || !measurement || measurement.isHorizontal) {
+            return;
+        }
+
+        const chapter = runtime.chapters.find(
+            (item) => normalizeText(item.title) === normalizeText(chapterTitle)
+        );
+        if (!chapter) {
+            return;
+        }
+
+        const trackerKey = chapter.chapterUid || normalizeText(chapter.title);
+        const tracker = runtime.chapterTrackers.get(trackerKey) || readTracker(trackerKey) || {};
+        const exactPageCount = Math.max(1, Number(measurement.pageCount || 1));
+
+        tracker.currentPage = clamp(Number(measurement.currentPage || 1), 1, exactPageCount);
+        tracker.maxPage = exactPageCount;
+        tracker.exactPageCount = exactPageCount;
+        tracker.lastScrollTop = Number(measurement.scrollTop || 0);
+        tracker.initialized = true;
+
+        runtime.chapterTrackers.set(trackerKey, tracker);
+        writeTracker(trackerKey, tracker);
     }
 
     function isReaderPage() {
@@ -617,7 +644,8 @@
             scrollTop,
             contentSignature,
             trackerSignature,
-            nearBottom
+            nearBottom,
+            isHorizontal: Boolean(document.querySelector('.wr_horizontalReader'))
         };
     }
 
@@ -702,6 +730,10 @@
     function getChapterPageCount(chapter, wordsPerPage) {
         const trackerKey = chapter && (chapter.chapterUid || normalizeText(chapter.title));
         const tracker = trackerKey ? readTracker(trackerKey) : null;
+        const exactPageCount = Math.max(0, Number(tracker && tracker.exactPageCount || 0));
+        if (exactPageCount > 0) {
+            return exactPageCount;
+        }
         return Math.max(estimatePageCount(chapter, wordsPerPage), Number(tracker && tracker.maxPage || 1));
     }
 
@@ -822,6 +854,22 @@
     }
 
     function getChapterProgress(chapter, measurement) {
+        if (!measurement.isHorizontal) {
+            const pageCount = Math.max(1, Number(measurement.pageCount || chapter.pageCount || 1));
+            const currentPage = clamp(Number(measurement.currentPage || 1), 1, pageCount);
+
+            if (runtime.pageTurnIntent?.chapterKey === normalizeText(chapter.title)) {
+                runtime.pageTurnIntent = null;
+            }
+
+            return {
+                currentPage,
+                overallRatio: clamp(Number(measurement.progressRatio || 0), 0, 1),
+                segmentIndex: currentPage,
+                segmentCount: pageCount
+            };
+        }
+
         const trackerKey = chapter.chapterUid || normalizeText(chapter.title);
         const storedTracker = readTracker(trackerKey);
         const tracker = runtime.chapterTrackers.get(trackerKey) || storedTracker || {
@@ -962,7 +1010,8 @@
                 signatureMap: tracker.signatureMap || {},
                 lastScrollTop: Number(tracker.lastScrollTop || 0),
                 initialized: Boolean(tracker.initialized),
-                maxSeenScrollTopThisPage: Number(tracker.maxSeenScrollTopThisPage || 0)
+                maxSeenScrollTopThisPage: Number(tracker.maxSeenScrollTopThisPage || 0),
+                exactPageCount: Math.max(0, Number(tracker.exactPageCount || 0))
             });
 
             window.localStorage.setItem(
