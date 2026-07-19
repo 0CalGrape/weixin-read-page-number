@@ -2,7 +2,7 @@
 // @name         微信读书宽屏改版
 // @icon         https://weread.qq.com/favicon.ico
 // @namespace    https://greasyfork.org/users/878514
-// @version      20260719.12
+// @version      20260719.14
 // @description  调整滚动阅读宽度和目录位置，并为滚动、双栏阅读提供统一的自动阅读控件。
 // @author       Velens
 // @match        https://weread.qq.com/web/reader/*
@@ -244,7 +244,7 @@
 
             catalogShiftPx = Math.round(clamp(parsed, CATALOG_SHIFT_MIN_PX, CATALOG_SHIFT_MAX_PX));
             GM_setValue('catalogShiftPx', catalogShiftPx);
-            shiftCatalog();
+            shiftReaderPanels();
         });
 
         GM_registerMenuCommand(`空格控制自动播放：${spaceAutoPlayOptions[spaceIndex]}`, () => {
@@ -366,23 +366,38 @@
         domRefreshPending = true;
         window.requestAnimationFrame(() => {
             domRefreshPending = false;
-            shiftCatalog();
+            shiftReaderPanels();
             document.querySelectorAll('.readerControls').forEach(initReaderControls);
             refreshScrollReviewMarks();
         });
     }
 
-    function shiftCatalog() {
+    function shiftReaderPanels() {
         const catalog = document.querySelector('.readerCatalog');
         if (!catalog) {
             return;
         }
 
-        const expected = `${catalogShiftPx}px`;
-        if (catalog.style.getPropertyValue('margin-left') !== expected
-            || catalog.style.getPropertyPriority('margin-left') !== 'important') {
-            catalog.style.setProperty('margin-left', expected, 'important');
-        }
+        const measureWidth = (panel) => {
+            const renderedWidth = panel.getBoundingClientRect().width;
+            if (renderedWidth > 0) {
+                return renderedWidth;
+            }
+            const computedWidth = getComputedStyle(panel).width;
+            return computedWidth.endsWith('px') ? Number.parseFloat(computedWidth) : 0;
+        };
+        const catalogWidth = measureWidth(catalog);
+        document.querySelectorAll('.readerCatalog, .readerAIChatPanel, .readerNotePanel').forEach((panel) => {
+            const panelWidth = measureWidth(panel);
+            const alignedOffset = catalogWidth > 0 && panelWidth > 0
+                ? catalogShiftPx + catalogWidth - panelWidth
+                : catalogShiftPx;
+            const expected = `${alignedOffset}px`;
+            if (panel.style.getPropertyValue('margin-left') !== expected
+                || panel.style.getPropertyPriority('margin-left') !== 'important') {
+                panel.style.setProperty('margin-left', expected, 'important');
+            }
+        });
     }
 
     function initReaderControls(controls) {
