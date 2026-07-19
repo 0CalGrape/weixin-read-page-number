@@ -2,8 +2,8 @@
 // @name    微信读书
 // @icon    https://weread.qq.com/favicon.ico
 // @namespace    https://greasyfork.org/users/878514
-// @version    20250405
-// @description    经典阅读器：宽屏显示，更改浅色模式背景色，开启沉浸式阅读、自动阅读和挂机模式，平滑滚动，空格翻页，调整页脚按钮，隐藏滚动条；双栏阅读器：更改浅色模式背景颜色，开启沉浸式阅读、自动阅读模式，空格翻页，屏幕常亮，配置持久化；
+// @version    20260719
+// @description    经典阅读器：宽屏显示，更改浅色模式背景色，开启沉浸式阅读、自动阅读和挂机模式，平滑滚动，空格翻页，调整页脚按钮，隐藏滚动条；双栏阅读器：更改浅色模式背景颜色，开启沉浸式阅读，配置持久化；
 // @author    Velens
 // @match    https://weread.qq.com/web/reader/*
 // @require    https://code.jquery.com/jquery-3.6.0.min.js
@@ -24,15 +24,16 @@ const scrollbars = [{titles:"滚动条：显示",displays:"auto"},{titles:"滚�
 const colors = [{titlec:"豆沙绿",RGB:"#C7EDCC"},{titlec:"杏仁黄",RGB:"#FAF9DE"},{titlec:"秋叶褐",RGB:"#FFF2E2"},{titlec:"胭脂红",RGB:"#FDE6E0"},{titlec:"海天蓝",RGB:"#DCE2F1"},{titlec:"葛巾紫",RGB:"#E9EBFE"},{titlec:"极光灰",RGB:"#EAEAEF"},{titlec:"青草绿",RGB:"#E3EDCD"},{titlec:"银河白",RGB:"#FFFFFF"}];
 const screenLocks = ["锁定","常亮"];
 const spacePages = ["开启","关闭"];
-const playAutos = ["自动阅读：模式一","自动阅读：模式二","自动阅读：关闭"],playAutos1 = ["自动阅读：开启","自动阅读：关闭"];
+const playAutos = ["自动阅读：模式一","自动阅读：模式二","自动阅读：关闭"];
 const scrollTops = ["阅读模式：沉浸式","阅读模式：默认"];
+const SCROLL_BOOK_REVIEW_STATE_KEY = "scrollShowBookReviews";
 let iw = GM_getValue("numw",0);
 let io = GM_getValue("numo",0);
 let is = GM_getValue("nums",0);
 let ic = GM_getValue("numc",0);
 let il = GM_getValue("numl",0);
 let iSpace = GM_getValue("numSpace",0);
-let iFlagp = GM_getValue("numFlagp",0),flagp = GM_getValue("flagp",true);
+let iFlagp = GM_getValue("numFlagp",0);
 let flagt = GM_getValue("flagt",true);
 var timeoutID,timePlay,timeStop,timeClick;
 var flagPlay = false,flagBOT = false;
@@ -98,6 +99,123 @@ function isEditableTarget(target){
     return target.isContentEditable || tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT';
 }
 
+let scrollBookReviewsEnabled = Boolean(GM_getValue(SCROLL_BOOK_REVIEW_STATE_KEY,false));
+let scrollBookReviewsRequestId = 0;
+
+function getBookReviewConfig(payload){
+    if(!payload || typeof payload !== 'object'){return null;}
+    const config = payload.data && typeof payload.data === 'object' ? payload.data : payload;
+    if(config.displayTopReview === undefined || config.displayTopReview === null){return null;}
+    return Boolean(Number(config.displayTopReview));
+}
+
+function updateScrollBookReviewButton(button,pending){
+    if(!button){return;}
+    button.classList.toggle('showBookReviews',!scrollBookReviewsEnabled);
+    button.classList.toggle('showBookReviews_active',scrollBookReviewsEnabled);
+    button.disabled = Boolean(pending);
+    button.setAttribute('aria-pressed',scrollBookReviewsEnabled ? 'true' : 'false');
+    button.setAttribute('aria-label',scrollBookReviewsEnabled ? '关闭书友想法' : '开启书友想法');
+    const tooltip = button.parentElement && button.parentElement.querySelector('.wr_tooltip_item');
+    if(tooltip){tooltip.textContent = scrollBookReviewsEnabled ? '关闭书友想法' : '开启书友想法';}
+}
+
+async function toggleScrollBookReviews(button){
+    const previous = scrollBookReviewsEnabled;
+    const requestId = ++scrollBookReviewsRequestId;
+    scrollBookReviewsEnabled = !previous;
+    updateScrollBookReviewButton(button,true);
+    try{
+        const response = await fetch('/web/user_config/modify',{
+            method:'POST',
+            credentials:'include',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({displayTopReview:scrollBookReviewsEnabled ? 1 : 0})
+        });
+        const payload = await response.json();
+        if(!response.ok || Number(payload && payload.errCode || 0) !== 0){
+            throw new Error(`HTTP ${response.status}`);
+        }
+        if(requestId !== scrollBookReviewsRequestId){return;}
+        GM_setValue(SCROLL_BOOK_REVIEW_STATE_KEY,scrollBookReviewsEnabled);
+        updateScrollBookReviewButton(button,false);
+    }catch(error){
+        if(requestId !== scrollBookReviewsRequestId){return;}
+        scrollBookReviewsEnabled = previous;
+        updateScrollBookReviewButton(button,false);
+        console.warn('[weixin-read-wide] 切换书友想法失败',error);
+    }
+}
+
+function createScrollBookReviewControl(){
+    const wrapper = document.createElement('div');
+    wrapper.className = 'wr_tooltip_container lv-scroll-book-reviews-control';
+    wrapper.style.setProperty('--offset','6px');
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'readerControls_item showBookReviews lv-scroll-book-reviews';
+    button.innerHTML = "<span class='icon'></span>";
+
+    const tooltip = document.createElement('div');
+    tooltip.className = 'wr_tooltip_item wr_tooltip_item--right';
+    tooltip.style.display = 'none';
+
+    wrapper.append(button,tooltip);
+    wrapper.addEventListener('mouseenter',function(){tooltip.style.display = '';});
+    wrapper.addEventListener('mouseleave',function(){tooltip.style.display = 'none';});
+    button.addEventListener('click',function(){toggleScrollBookReviews(button);});
+    updateScrollBookReviewButton(button,false);
+    return wrapper;
+}
+
+function syncBookReviewControl(){
+    const controls = document.querySelector('.readerControls');
+    if(!controls){return;}
+
+    if(document.querySelector('.wr_horizontalReader')){
+        const nativeButton = controls.querySelector('.showBookReviews_active, .showBookReviews');
+        if(nativeButton && !nativeButton.classList.contains('lv-scroll-book-reviews')){
+            scrollBookReviewsEnabled = nativeButton.classList.contains('showBookReviews_active');
+            GM_setValue(SCROLL_BOOK_REVIEW_STATE_KEY,scrollBookReviewsEnabled);
+        }
+        controls.querySelector('.lv-scroll-book-reviews-control')?.remove();
+        return;
+    }
+
+    const modeButton = controls.querySelector('.isNormalReader');
+    const modeControl = modeButton && (modeButton.closest('.wr_tooltip_container') || modeButton);
+    if(!modeControl || modeControl.parentElement !== controls){return;}
+    let reviewControl = controls.querySelector('.lv-scroll-book-reviews-control');
+    if(!reviewControl){reviewControl = createScrollBookReviewControl();}
+    if(reviewControl.nextElementSibling !== modeControl){
+        controls.insertBefore(reviewControl,modeControl);
+    }
+}
+
+function initBookReviewControl(){
+    syncBookReviewControl();
+    new MutationObserver(syncBookReviewControl).observe(document.documentElement,{
+        childList:true,
+        subtree:true
+    });
+
+    if(!document.querySelector('.wr_horizontalReader')){
+        fetch('/web/user_config',{credentials:'include'})
+            .then(function(response){return response.ok ? response.json() : null;})
+            .then(function(payload){
+                const enabled = getBookReviewConfig(payload);
+                if(enabled === null){return;}
+                scrollBookReviewsEnabled = enabled;
+                GM_setValue(SCROLL_BOOK_REVIEW_STATE_KEY,enabled);
+                updateScrollBookReviewButton(document.querySelector('.lv-scroll-book-reviews'),false);
+            })
+            .catch(function(error){console.warn('[weixin-read-wide] 读取书友想法设置失败',error);});
+    }
+}
+
+initBookReviewControl();
+
 if (document.querySelector(".wr_horizontalReader")){
     GM_registerMenuCommand("背景色：" + colors[ic].titlec,color);
     GM_addStyle(`.wr_whiteTheme .wr_horizontalReader .readerChapterContent,.wr_whiteTheme .readerControls_fontSize, .wr_whiteTheme .readerControls_item {background-color: ${colors[ic].RGB};}`);
@@ -114,121 +232,6 @@ if (document.querySelector(".wr_horizontalReader")){
         timeoutID = setTimeout(() => location.reload(),10000);
         GM_setValue("timeoutID",timeoutID);
     };
-
-    GM_registerMenuCommand("空格热键：" + spacePages[iSpace],spacePage);
-    function spacePage(){
-        if(iSpace < spacePages.length-1){iSpace++;}
-        else{iSpace = 0;}
-        GM_setValue("numSpace",iSpace);
-        location.reload();
-    }
-    function nextPage () {
-        const event = new KeyboardEvent('keydown', {
-            key: 'ArrowRight',
-            keyCode: 39
-        });
-        document.dispatchEvent(event);
-    };
-    if(iSpace == 0){
-        $(document).keydown(function(event){
-            if(event.keyCode == 32 && !isEditableTarget(event.target)){
-                event.preventDefault();
-                $('.readToggle').click();
-            }
-        })};
-
-    if(flagp){
-        GM_registerMenuCommand(playAutos1[0],playAuto1);
-        $(window).on('load', function () {
-            var buttonRead = "<button title='播放' class='readerControls_item readToggle'></button>"
-            $('.readerControls').append(buttonRead);
-            var iconToggle = "<span class='iconRead iconToggle'>播放</span>";
-            $('.readToggle').append(iconToggle);
-            GM_addStyle(`.iconRead{opacity:0.7;font-size: 12px;color:#fff}`);
-            GM_addStyle(`.wr_whiteTheme .iconRead{color:#000;}`);
-            $(".iconRead").mouseenter(function () {$(this).css("opacity", "1");});
-            $(".iconRead").mouseleave(function () {$(this).css("opacity", ".7");});
-
-            let timePagedown = GM_getValue("timePagedown",20000);
-            let wakeLock = null;
-            const requestWakeLock = async ()=>{
-                try {wakeLock = await navigator.wakeLock.request('screen');}
-                catch (err) {console.log(`${err.name}, ${err.message}`);}}
-            const updateReadToggle = function () {
-                $('.iconToggle').text(flagPlay ? '暂停' : '播放');
-                $('.readToggle').attr('title', flagPlay ? "时长：" + timeStopmin + "（双击修改）" : "间隔：" + timePagedown + "（双击修改）");
-            }
-            const stopRead = function () {
-                flagPlay = false;
-                GM_addStyle(`.readToggle{box-shadow: 0 4px 20px rgba(0,0,0,.03) !important;}`);
-                clearInterval(timePlay);
-                clearTimeout(timeStop);
-                if(wakeLock != null){wakeLock.release().then(() => {wakeLock = null});}
-                updateReadToggle();
-            }
-            const startRead = function () {
-                flagPlay = true;
-                if(flagt){readerTopBar[0].style.opacity = 0;GM_addStyle(`.readerControls{opacity:0;}`);}
-                clearInterval(timePlay);
-                clearTimeout(timeStop);
-                timePlay = setInterval(nextPage, timePagedown);
-                if(timeStopmin != 0){timeStop = setTimeout(stopRead,timeStopmin*60000);}
-                if(il != 0){requestWakeLock();}
-                updateReadToggle();
-            }
-            updateReadToggle();
-
-            $('.readToggle').click(function () {
-                clearTimeout(timeClick);
-                timeClick = setTimeout(function(){
-                    if(flagPlay){stopRead();}
-                    else{startRead();}
-                },250);
-            });
-
-            $('.readToggle').dblclick(function () {
-                clearTimeout(timeClick);
-                if(flagPlay){
-                    timeStopmin = prompt("请输入暂停时长（分钟）（默认：0，不自动暂停）", timeStopmin);
-                    if(timeStopmin != null && /^\d+$/.test(timeStopmin)){
-                        GM_setValue("timeStopmin",timeStopmin);}
-                    else{timeStopmin = GM_getValue("timeStopmin");}
-                }else{
-                    let timePagedown1 = timePagedown;
-                    timePagedown = prompt("请输入翻页间隔（毫秒）（默认：20000）", timePagedown);
-                    if(timePagedown != null && /^\d+$/.test(timePagedown)){
-                        if(timePagedown < 1000){timePagedown = 1000;}
-                        if(timePagedown != timePagedown1 && flagPlay){
-                            clearInterval(timePlay);
-                            timePlay = setInterval(nextPage, timePagedown);}
-                        GM_setValue("timePagedown",timePagedown);}
-                    else{timePagedown = GM_getValue("timePagedown");}
-                }
-                updateReadToggle();
-            })
-
-            $(document).keydown(function(event){
-                if((event.keyCode == 96 || event.keyCode == 32) && !isEditableTarget(event.target)){
-                    if(event.keyCode == 32){event.preventDefault();}
-                    $('.readToggle').click();
-                }
-            });
-        })
-    }else{GM_registerMenuCommand(playAutos1[1],playAuto1);}
-    function playAuto1(){
-        flagp = !flagp;
-        GM_setValue("flagp",flagp);
-        location.reload();
-    };
-
-    if(flagp){
-        GM_registerMenuCommand("屏幕状态：" + screenLocks[il],screenLock);
-        function screenLock(){
-            if(il < screenLocks.length-1){il++;}
-            else{il = 0;}
-            GM_setValue("numl",il);
-            location.reload();
-        };}
 
     if(flagt){
         GM_registerMenuCommand(scrollTops[0],scrollTop);
@@ -310,7 +313,6 @@ if (document.querySelector(".wr_horizontalReader")){
         if(widths[iw].titlew != "满列"){GM_addStyle(`.wr_page_reader.wr_whiteTheme {background-image: linear-gradient(#0000000d,#0000000d);background-color: ${colors[ic].RGB};background-blend-mode: multiply;}`);};
         if(footers[io].titlet == "隐藏"){
             GM_addStyle(`.wr_whiteTheme .readerFooter_button {background-color: ${colors[ic].RGB};}`);}
-        if(iFlagp != 2){GM_addStyle(`.wr_whiteTheme .autoReads{background-color:${colors[ic].RGB};}`)};
         timeoutID = setTimeout(() => location.reload(),10000);
         GM_setValue("timeoutID",timeoutID);
     };
@@ -323,6 +325,14 @@ if (document.querySelector(".wr_horizontalReader")){
             GM_setValue("numl",il);
             location.reload();
         };}
+
+    GM_registerMenuCommand("空格热键：" + spacePages[iSpace],spacePage);
+    function spacePage(){
+        if(iSpace < spacePages.length-1){iSpace++;}
+        else{iSpace = 0;}
+        GM_setValue("numSpace",iSpace);
+        location.reload();
+    }
 
     function nextPage () {
         const event = new KeyboardEvent('keydown', {
@@ -342,14 +352,9 @@ if (document.querySelector(".wr_horizontalReader")){
     GM_registerMenuCommand(playAutos[iFlagp],playAuto);
     if(iFlagp != 2){
         $(window).on('load', function () {
-            var classRead = document.createElement("div");
-            classRead.className = "autoRead";
-            GM_addStyle(`.autoRead{width:48px;position:fixed;bottom:48px;z-index:5;margin-right:548px;right:50%;margin-right:${widths[iw].margin_left};}`);
-            document.body.append(classRead);
-            var buttonRead = "<button title='播放' class='autoReads readToggle'></button><button title='倍数' class='autoReads readSpeed'></button>";
-            GM_addStyle(`.autoReads{width:48px;height:48px;border-radius:24px;margin-top:24px;box-shadow: 0 8px 32px rgba(0,25,104,.1);background-color:#1C1C1D;}`);
-            GM_addStyle(`.wr_whiteTheme .autoReads{background-color:${colors[ic].RGB};}`);
-            $('.autoRead').append(buttonRead);
+            var buttonRead = "<button type='button' title='播放' aria-label='播放' class='readerControls_item autoReads readToggle'></button><button type='button' title='倍速' aria-label='倍速' class='readerControls_item autoReads readSpeed'></button>";
+            GM_addStyle(`.autoReads{font-size:12px;}`);
+            $('.readerControls').append(buttonRead);
             var iconToggle = "<span class='iconRead iconToggle'>播放</span>";
             var iconSpeed = "<span class='iconRead iconSpeed'>倍速</span>";
             GM_addStyle(`.iconRead{opacity:0.7;width:48px;height:48px;display:inline-block;line-height:48px;text-align:center;color:#fff}`);
@@ -358,10 +363,6 @@ if (document.querySelector(".wr_horizontalReader")){
             $('.readSpeed').append(iconSpeed);
             $(".iconRead").mouseenter(function () {$(this).css("opacity", "1");});
             $(".iconRead").mouseleave(function () {$(this).css("opacity", ".7");});
-            if(flagt){
-                classRead.addEventListener('mouseenter', function(){ classRead.style.opacity = 1});
-                classRead.addEventListener('mouseleave', function(){ classRead.style.opacity = 0});
-                setTimeout(() => GM_addStyle(`.autoRead{opacity:0;}`),10000);}
 
             var timePage,numPlay=0;
             let ynumDown = GM_getValue("ynumDown",1);
@@ -382,7 +383,6 @@ if (document.querySelector(".wr_horizontalReader")){
                 flagPlay = false;
                 flagBOT = false;
                 numPlay = 0;
-                GM_addStyle(`.readToggle{box-shadow: 0 8px 32px rgba(0,25,104,.1);}`);
                 if(iFlagp == 0){cancelAnimationFrame(timePlay);}
                 if(iFlagp == 1){clearInterval(timePlay);}
                 clearTimeout(timeStop);
@@ -394,7 +394,6 @@ if (document.querySelector(".wr_horizontalReader")){
                 flagPlay = true;
                 flagBOT = false;
                 if(flagt){
-                    GM_addStyle(`.autoRead{opacity:0;}`);
                     readerControls[0].style.opacity = 0;}
                 clearTimeout(timeStop);
                 if(iFlagp == 0){
@@ -519,8 +518,7 @@ if (document.querySelector(".wr_horizontalReader")){
                 // 下滑隐藏
                 readerTopBar[0].style.opacity = 0;
                 if(!flagPlay && !flagBOT){
-                    readerControls[0].style.opacity = 0;
-                    if(iFlagp != 2){GM_addStyle(`.autoRead{opacity:0;}`)}}
+                    readerControls[0].style.opacity = 0;}
             }
             readerTopBar[0].addEventListener('mouseenter', function(){ readerTopBar[0].style.opacity = 1});
             readerTopBar[0].addEventListener('mouseleave', function(){ if(scroll <= scrollTop){ readerTopBar[0].style.opacity = 1}else{ readerTopBar[0].style.opacity = 0}});
