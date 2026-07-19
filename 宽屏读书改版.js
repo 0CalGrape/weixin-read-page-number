@@ -2,7 +2,7 @@
 // @name    微信读书
 // @icon    https://weread.qq.com/favicon.ico
 // @namespace    https://greasyfork.org/users/878514
-// @version    20260719.16
+// @version    20260719.18
 // @description    经典阅读器宽屏显示、自动阅读、空格翻页、右侧快捷按钮、目录位置调整与原生书友想法；双栏阅读器保留基础布局和书友想法按钮。
 // @author    Velens
 // @match    https://weread.qq.com/web/reader/*
@@ -36,7 +36,7 @@ const SCROLLBAR_MODES = [
     {title:"滚动条：隐藏",value:"hidden"},
     {title:"滚动条：默认",value:"default"}
 ];
-let iw = GM_getValue("numw",0);
+let iw = Number(GM_getValue("numw",0));
 let spacePlayPauseEnabled = GM_getValue(SPACE_PLAY_PAUSE_KEY,true) !== false;
 let catalogShiftPx = Number(GM_getValue(CATALOG_SHIFT_KEY,0));
 let scrollbarModeIndex = Number(GM_getValue("nums",0));
@@ -44,10 +44,20 @@ if(!Number.isFinite(catalogShiftPx)){catalogShiftPx = 0;}
 if(!Number.isInteger(scrollbarModeIndex) || scrollbarModeIndex < 0 || scrollbarModeIndex >= SCROLLBAR_MODES.length){
     scrollbarModeIndex = 0;
 }
+if(!Number.isInteger(iw) || iw < 0 || iw >= widths.length){iw = 0;}
 if(widths[iw] && widths[iw].titlew !== "默认"){
     // 必须在微信读书第一次排版前写入宽度，否则正文画布与后加的下划线会使用两套坐标系。
-    GM_addStyle(`.readerContent .app_content, .readerTopBar {max-width: ${widths[iw].width};}`);
-    GM_addStyle(`.readerControls {align-items: ${widths[iw].align_items};margin-left: ${widths[iw].margin_left};}`);
+    GM_addStyle(`
+        .readerContent .app_content,
+        .readerTopBar {
+            width: ${widths[iw].width} !important;
+            max-width: ${widths[iw].width} !important;
+        }
+        .readerControls {
+            align-items: ${widths[iw].align_items} !important;
+            margin-left: ${widths[iw].margin_left} !important;
+        }
+    `);
 }
 var timePlay,timeStop,timeClick;
 var flagPlay = false;
@@ -137,6 +147,11 @@ let mainBookReviewLayoutRaw = '';
 let mainBookReviewLayoutCache = null;
 let lastLayoutCaptureRequestAt = 0;
 const simulatedReviewPagePromises = new Map();
+const simulatedReviewPositionBatchPromises = new Map();
+let simulatedLayoutResizeObserver = null;
+let simulatedLayoutObservedContainer = null;
+let simulatedLayoutObservedWidth = 0;
+let simulatedLayoutRecaptureTimer = 0;
 const observedReaderBookIds = [];
 
 function recordReaderBookIdFromRequest(requestUrl){
@@ -381,20 +396,31 @@ function mainWorldBookReviewBridge(captureInitially){
                 normalized[3] = Math.round((Number(normalized[3])-Number(rootRect.top))*100)/100;
                 normalized[6] = 1;
             }
-            const key = `${normalized[0]}:${normalized[2]}:${normalized[3]}:${normalized[4]}:${normalized[5]}`;
+            const key = `${normalized[0]}:${normalized[2]}:${normalized[3]}:${normalized[4]}:${normalized[5]}:${normalized[7] || ''}`;
             normalizedRecords.set(key,normalized);
         });
         layoutRecords.clear();
         normalizedRecords.forEach(function(record,key){layoutRecords.set(key,record);});
-        const items = Array.from(layoutRecords.values()).slice(0,30000).map(function(record){return record.slice(0,6);});
+        // 微信读书先在一个带顶部占位的临时排版层测量文字，再把首个文字对象平移到画布顶部绘制。
+        // 因此必须去掉临时层的最小 top；否则所有下划线都会整体落到目标文字下方数百像素。
+        const contentTop = Array.from(layoutRecords.values()).reduce(function(minimum,record){
+            const top = Number(record[3]);
+            return Number.isFinite(top) ? Math.min(minimum,top) : minimum;
+        },Infinity);
+        const normalizedContentTop = Number.isFinite(contentTop) ? contentTop : 0;
+        const items = Array.from(layoutRecords.values()).slice(0,30000).map(function(record){
+            const item = record.slice(0,6);
+            item[3] = Math.round((Number(item[3])-normalizedContentTop)*100)/100;
+            return item.concat(String(record[7] || ''));
+        });
         documentRoot.setAttribute(layoutAttribute,JSON.stringify({
-            updatedAt:Date.now(),title:layoutTitle,width:layoutWidth,height:layoutHeight,items:items
+            updatedAt:Date.now(),title:layoutTitle,width:layoutWidth,height:layoutHeight,contentTop:normalizedContentTop,items:items
         }));
         document.dispatchEvent(new CustomEvent(layoutEvent));
         if(lastLayoutPublishedCount !== items.length){
             lastLayoutPublishedCount = items.length;
             console.info('[weixin-read-wide] 正文坐标捕获统计 ' + JSON.stringify({
-                title:layoutTitle,objectCount:items.length,width:layoutWidth,height:layoutHeight
+                title:layoutTitle,objectCount:items.length,width:layoutWidth,height:layoutHeight,contentTop:normalizedContentTop
             }));
         }
     }
@@ -435,9 +461,10 @@ function mainWorldBookReviewBridge(captureInitially){
                 layoutWidth = Math.round(Number(rootRect.width) * 100) / 100;
                 layoutHeight = Math.round(Number(rootRect.height) * 100) / 100;
             }
+            const elementText = String(element.textContent || element.getAttribute('alt') || '');
             const declaredLength = Number(element.getAttribute('data-wr-len') || element.getAttribute('data-wr-co-len'));
             const textLength = Number.isFinite(declaredLength) && declaredLength > 0 ? declaredLength :
-                Math.max(1,String(element.textContent || element.getAttribute('alt') || '').length);
+                Math.max(1,elementText.length);
             Array.from(rects || []).forEach(function(rect){
                 const left = Number(rect.left) - Number(rootRect && rootRect.left || 0);
                 const top = Number(rect.top) - Number(rootRect && rootRect.top || 0);
@@ -448,7 +475,8 @@ function mainWorldBookReviewBridge(captureInitially){
                     return index < 2 ? value : Math.round(value * 100) / 100;
                 });
                 rounded.push(rootRect ? 1 : 0);
-                const key = `${rounded[0]}:${rounded[2]}:${rounded[3]}:${rounded[4]}:${rounded[5]}`;
+                rounded.push(elementText.slice(0,textLength));
+                const key = `${rounded[0]}:${rounded[2]}:${rounded[3]}:${rounded[4]}:${rounded[5]}:${rounded[7]}`;
                 layoutRecords.set(key,rounded);
             });
             if(layoutRecords.size){scheduleLayoutSnapshot();}
@@ -948,6 +976,28 @@ function scheduleScrollBookReviewUnderlines(delay){
     scrollBookReviewRenderTimer = window.setTimeout(renderScrollBookReviewUnderlines,delay === undefined ? 120 : delay);
 }
 
+function observeSimulatedLayoutWidth(){
+    if(typeof ResizeObserver !== 'function'){return;}
+    const container = document.querySelector('.renderTargetContainer');
+    if(!container || container === simulatedLayoutObservedContainer){return;}
+    if(simulatedLayoutResizeObserver){simulatedLayoutResizeObserver.disconnect();}
+    simulatedLayoutObservedContainer = container;
+    simulatedLayoutObservedWidth = container.getBoundingClientRect().width;
+    simulatedLayoutResizeObserver = new ResizeObserver(function(){
+        // ResizeObserver 的 contentRect 不含边框；正文坐标使用 getBoundingClientRect，二者混用会产生 2px 的假变化。
+        const width = container.getBoundingClientRect().width;
+        if(Math.abs(width-simulatedLayoutObservedWidth) <= 1){return;}
+        simulatedLayoutObservedWidth = width;
+        window.clearTimeout(simulatedLayoutRecaptureTimer);
+        document.querySelectorAll('.lv-scroll-book-review-underlines').forEach(function(layer){layer.remove();});
+        simulatedLayoutRecaptureTimer = window.setTimeout(function(){
+            requestMainBookReviewLayoutCapture(true);
+            scheduleScrollBookReviewUnderlines(350);
+        },120);
+    });
+    simulatedLayoutResizeObserver.observe(container);
+}
+
 function normalizeBookReviewRange(value){
     const range = value && value.range !== undefined ? value.range : value;
     if(typeof range === 'string'){
@@ -1158,7 +1208,7 @@ async function loadSimulatedHorizontalReviewData(force){
             const result = {
                 bookId:bookId,chapterUid:chapter.chapterUid,title:title,
                 chapterCount:chapters.length,underlines:underlines,
-                reviewsByRange:{}
+                reviewsByRange:{},positionReviewsByRange:{},positionAttemptedRanges:{}
             };
             simulatedHorizontalReviewKey = key;
             simulatedHorizontalReviewData = result;
@@ -1265,6 +1315,26 @@ async function fetchBookReviewsDirect(bookId,chapterUid,range){
     return Array.isArray(reviews) && reviews[0] ? reviews[0] : {};
 }
 
+async function fetchBookReviewPositionBatchDirect(bookId,chapterUid,ranges){
+    const response = await fetch('/web/book/readReviews',{
+        method:'POST',
+        credentials:'include',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+            bookId:String(bookId),
+            chapterUid:chapterUid,
+            reviews:ranges.map(function(range){return {range:range,maxIdx:0,count:1,synckey:0};})
+        })
+    });
+    const payload = await response.json();
+    if(!response.ok || Number(payload && payload.errCode || 0) !== 0){
+        throw new Error(`读取书友想法原文失败：HTTP ${response.status}`);
+    }
+    const reviews = payload && Array.isArray(payload.reviews) ? payload.reviews :
+        payload && payload.data && payload.data.reviews;
+    return Array.isArray(reviews) ? reviews : [];
+}
+
 async function loadSimulatedReviewPage(data,rangeString){
     if(data.reviewsByRange && data.reviewsByRange[rangeString]){
         return data.reviewsByRange[rangeString];
@@ -1319,7 +1389,75 @@ function mergeSimulatedLayoutRects(rects){
     });
 }
 
-function buildSimulatedUnderlineItems(data,layout,scaleX,scaleY){
+function normalizeSimulatedPositionText(value){
+    return String(value || '')
+        .replace(/<[^>]*>/g,'')
+        .replace(/&nbsp;|&#160;/gi,' ')
+        .replace(/&amp;/gi,'&')
+        .replace(/&lt;/gi,'<')
+        .replace(/&gt;/gi,'>')
+        .replace(/&quot;|&#34;/gi,'"')
+        .replace(/[\u0000-\u0020\u00a0\u200b-\u200d\u2028\u2029\ufeff]/g,'');
+}
+
+function getReviewPositionAbstract(reviewPage){
+    const pageReviews = reviewPage && Array.isArray(reviewPage.pageReviews) ? reviewPage.pageReviews : [];
+    for(const pageReview of pageReviews){
+        for(const candidate of getReviewCandidates(pageReview)){
+            const value = candidate.abstract || candidate.rangeContent || candidate.markText || candidate.selectedText;
+            if(typeof value === 'string' && normalizeSimulatedPositionText(value)){return value;}
+        }
+    }
+    return '';
+}
+
+function getUnderlinePositionAbstract(underline){
+    if(!underline || typeof underline !== 'object'){return '';}
+    const value = underline.abstract || underline.rangeContent || underline.markText || underline.selectedText || underline.quote;
+    return typeof value === 'string' ? value : '';
+}
+
+function buildSimulatedLayoutTextIndex(records){
+    const textByOffset = new Map();
+    records.forEach(function(record){
+        const text = String(record.text || '');
+        const length = Math.min(text.length,Math.max(1,record.length));
+        for(let index=0;index<length;index++){
+            const offset = record.offset + index;
+            if(!textByOffset.has(offset)){textByOffset.set(offset,text.charAt(index));}
+        }
+    });
+    let text = '';
+    const offsets = [];
+    Array.from(textByOffset.keys()).sort(function(a,b){return a-b;}).forEach(function(offset){
+        const normalized = normalizeSimulatedPositionText(textByOffset.get(offset));
+        for(let index=0;index<normalized.length;index++){
+            text += normalized.charAt(index);
+            offsets.push(offset);
+        }
+    });
+    return {text:text,offsets:offsets,characterCount:textByOffset.size};
+}
+
+function resolveSimulatedPositionRange(textIndex,abstract,sourceRange){
+    const needle = normalizeSimulatedPositionText(abstract);
+    if(!needle || needle.length < 2 || !textIndex.text || textIndex.offsets.length !== textIndex.text.length){return null;}
+    let matchIndex = textIndex.text.indexOf(needle);
+    let bestIndex = -1;
+    let bestDistance = Infinity;
+    while(matchIndex >= 0){
+        const offset = textIndex.offsets[matchIndex];
+        const distance = Math.abs(offset-sourceRange.start);
+        if(distance < bestDistance){bestIndex = matchIndex;bestDistance = distance;}
+        matchIndex = textIndex.text.indexOf(needle,matchIndex+1);
+    }
+    if(bestIndex < 0){return null;}
+    const start = textIndex.offsets[bestIndex];
+    const lastOffset = textIndex.offsets[bestIndex+needle.length-1];
+    return Number.isFinite(start) && Number.isFinite(lastOffset) ? {start:start,end:lastOffset+1} : null;
+}
+
+function buildSimulatedUnderlineItems(data,layout){
     if(!data || !layout || !Array.isArray(layout.items)){return [];}
     if(layout.title && data.title && layout.title !== data.title){return [];}
     const records = layout.items.map(function(item){
@@ -1327,10 +1465,11 @@ function buildSimulatedUnderlineItems(data,layout,scaleX,scaleY){
         const values = item.slice(0,6).map(Number);
         if(!values.every(Number.isFinite) || values[4] <= 0 || values[5] <= 0){return null;}
         return {
-            offset:values[0],length:Math.max(1,values[1]),
-            left:values[2]*scaleX,top:values[3]*scaleY,width:values[4]*scaleX,height:values[5]*scaleY
+            offset:values[0],length:Math.max(1,values[1]),text:String(item[6] || ''),
+            left:values[2],top:values[3],width:values[4],height:values[5]
         };
     }).filter(Boolean).sort(function(a,b){return a.offset-b.offset || a.top-b.top || a.left-b.left;});
+    const textIndex = buildSimulatedLayoutTextIndex(records);
     const items = [];
     const seenRanges = new Set();
     (Array.isArray(data.underlines) ? data.underlines : []).forEach(function(underline){
@@ -1339,20 +1478,71 @@ function buildSimulatedUnderlineItems(data,layout,scaleX,scaleY){
         const rangeString = `${range.start}-${range.end}`;
         if(seenRanges.has(rangeString)){return;}
         seenRanges.add(rangeString);
+        const reviewPage = data.positionReviewsByRange && data.positionReviewsByRange[rangeString];
+        const abstract = getUnderlinePositionAbstract(underline) || getReviewPositionAbstract(reviewPage);
+        const resolvedRange = resolveSimulatedPositionRange(textIndex,abstract,range);
+        const positionRange = resolvedRange || range;
         const seenRects = new Set();
         const rects = [];
         for(const record of records){
-            if(record.offset >= range.end){break;}
-            if(record.offset + record.length <= range.start){continue;}
+            if(record.offset >= positionRange.end){break;}
+            if(record.offset + record.length <= positionRange.start){continue;}
             const key = `${record.left}:${record.top}:${record.width}:${record.height}`;
             if(seenRects.has(key)){continue;}
             seenRects.add(key);
             rects.push(record);
         }
         const merged = mergeSimulatedLayoutRects(rects);
-        if(merged.length){items.push({range:rangeString,start:range.start,end:range.end,rects:merged});}
+        if(merged.length){
+            items.push({
+                range:rangeString,start:range.start,end:range.end,rects:merged,
+                positionSource:resolvedRange ? 'text' : 'range',positionStart:positionRange.start,positionEnd:positionRange.end
+            });
+        }
     });
+    items.textCharacterCount = textIndex.characterCount;
     return items;
+}
+
+function loadVisibleSimulatedReviewPositions(data,items,container){
+    if(!data || !container || !Array.isArray(items) || !items.length){return;}
+    data.positionReviewsByRange = data.positionReviewsByRange || {};
+    data.positionAttemptedRanges = data.positionAttemptedRanges || {};
+    const containerRect = container.getBoundingClientRect();
+    const viewportTop = -containerRect.top-700;
+    const viewportBottom = window.innerHeight-containerRect.top+700;
+    const ranges = [];
+    items.forEach(function(item){
+        if(ranges.length >= 12 || data.positionReviewsByRange[item.range] || data.positionAttemptedRanges[item.range]){return;}
+        const visible = item.rects.some(function(rect){return rect.top+rect.height >= viewportTop && rect.top <= viewportBottom;});
+        if(visible){ranges.push(item.range);}
+    });
+    if(!ranges.length){return;}
+    const key = `${data.bookId}:${data.chapterUid}:${ranges.join(',')}`;
+    if(simulatedReviewPositionBatchPromises.has(key)){return;}
+    ranges.forEach(function(range){data.positionAttemptedRanges[range] = true;});
+    const promise = fetchBookReviewPositionBatchDirect(data.bookId,data.chapterUid,ranges).then(function(reviewPages){
+        let abstractCount = 0;
+        const pagesByRange = new Map();
+        reviewPages.forEach(function(reviewPage){
+            if(reviewPage && reviewPage.range !== undefined){pagesByRange.set(String(reviewPage.range),reviewPage);}
+        });
+        ranges.forEach(function(range,index){
+            const reviewPage = pagesByRange.get(range) || reviewPages[index] || {};
+            data.positionReviewsByRange[range] = reviewPage;
+            if(getReviewPositionAbstract(reviewPage)){abstractCount++;}
+        });
+        console.info('[weixin-read-wide] 可见书友想法原文定位统计 ' + JSON.stringify({
+            requestedRangeCount:ranges.length,returnedRangeCount:reviewPages.length,abstractCount:abstractCount
+        }));
+        scheduleScrollBookReviewUnderlines(0);
+    }).catch(function(error){
+        ranges.forEach(function(range){delete data.positionAttemptedRanges[range];});
+        console.warn('[weixin-read-wide] 可见书友想法原文定位失败 ' + JSON.stringify({
+            rangeCount:ranges.length,message:String(error)
+        }));
+    }).finally(function(){simulatedReviewPositionBatchPromises.delete(key);});
+    simulatedReviewPositionBatchPromises.set(key,promise);
 }
 
 function getReviewCandidates(review){
@@ -1664,6 +1854,7 @@ function renderMainBridgeUnderlines(state){
 function renderSimulatedBookReviewUnderlines(data,layout){
     const container = document.querySelector('.renderTargetContainer');
     if(!container || !container.isConnected){scheduleScrollBookReviewUnderlines(300);return;}
+    observeSimulatedLayoutWidth();
     let layer = Array.from(container.children).find(function(child){
         return child.classList && child.classList.contains('lv-scroll-book-review-underlines');
     });
@@ -1673,14 +1864,31 @@ function renderSimulatedBookReviewUnderlines(data,layout){
         container.appendChild(layer);
     }
     const containerRect = container.getBoundingClientRect();
-    const rawScaleX = Number(layout && layout.width) > 0 ? containerRect.width/Number(layout.width) : 1;
-    const rawScaleY = Number(layout && layout.height) > 0 ? containerRect.height/Number(layout.height) : 1;
-    const scaleX = Number.isFinite(rawScaleX) && rawScaleX > .25 && rawScaleX < 4 ? rawScaleX : 1;
-    const scaleY = Number.isFinite(rawScaleY) && rawScaleY > .25 && rawScaleY < 4 ? rawScaleY : 1;
-    const items = buildSimulatedUnderlineItems(data,layout,scaleX,scaleY);
+    const widthDifference = Math.abs(containerRect.width-Number(layout && layout.width || 0));
+    const heightDifference = Math.abs(containerRect.height-Number(layout && layout.height || 0));
+    if(widthDifference > 1 || heightDifference > 2){
+        layer.replaceChildren();
+        const mismatchStats = {
+            layoutWidth:Number(layout && layout.width || 0),currentWidth:Math.round(containerRect.width*100)/100,
+            layoutHeight:Number(layout && layout.height || 0),currentHeight:Math.round(containerRect.height*100)/100
+        };
+        const mismatchKey = JSON.stringify(mismatchStats);
+        if(scrollBookReviewLastWaitingLogKey !== mismatchKey){
+            scrollBookReviewLastWaitingLogKey = mismatchKey;
+            console.info('[weixin-read-wide] 正文宽度已变化，正在按当前排版重新定位 ' + mismatchKey);
+        }
+        requestMainBookReviewLayoutCapture(false);
+        scheduleScrollBookReviewUnderlines(350);
+        return;
+    }
+    const items = buildSimulatedUnderlineItems(data,layout);
+    loadVisibleSimulatedReviewPositions(data,items,container);
+    // 数字 range 只用于判断哪些想法接近视口；真正显示前必须用 review.abstract 在当前画布文字中匹配成功。
+    // 这样不会把偏移基准不同的 range 直接画到下一行或行尾空白处。
+    const displayItems = items.filter(function(item){return item.positionSource === 'text';});
     const fragment = document.createDocumentFragment();
     let renderedCount = 0;
-    items.forEach(function(item){
+    displayItems.forEach(function(item){
         item.rects.forEach(function(rect){
             const cssText = getRectCssText(rect);
             if(!cssText){return;}
@@ -1688,6 +1896,8 @@ function renderSimulatedBookReviewUnderlines(data,layout){
             wrapper.className = 'wr_underline_wrapper wr_underline_color_0';
             wrapper.style.cssText = cssText;
             wrapper.dataset.range = item.range;
+            wrapper.dataset.positionSource = item.positionSource;
+            wrapper.dataset.positionRange = `${item.positionStart}-${item.positionEnd}`;
             const underline = document.createElement('div');
             underline.className = 'wr_underline wr_underline_thought';
             wrapper.appendChild(underline);
@@ -1708,8 +1918,10 @@ function renderSimulatedBookReviewUnderlines(data,layout){
     const stats = {
         source:'simulated-layout',underlineCount:Array.isArray(data.underlines) ? data.underlines.length : 0,
         layoutObjectCount:layout && Array.isArray(layout.items) ? layout.items.length : 0,
-        matchedRangeCount:items.length,renderedCount:renderedCount,
-        scaleX:Math.round(scaleX*1000)/1000,scaleY:Math.round(scaleY*1000)/1000
+        candidateRangeCount:items.length,matchedRangeCount:displayItems.length,renderedCount:renderedCount,
+        unresolvedRangeCount:items.length-displayItems.length,
+        capturedTextCharacterCount:Number(items.textCharacterCount) || 0,
+        layoutWidth:Number(layout.width),currentWidth:Math.round(containerRect.width*100)/100
     };
     const logKey = JSON.stringify(stats);
     if(scrollBookReviewLastRenderLogKey !== logKey){
@@ -1865,6 +2077,7 @@ function initScrollBookReviewUnderlines(){
     const waitForRenderedCanvas = function(){
         if(document.querySelector('.wr_canvasContainer canvas')){
             scrollBookReviewLastChapterTitle = getCurrentReaderChapterTitle();
+            observeSimulatedLayoutWidth();
             if(scrollBookReviewsEnabled){
                 loadSimulatedHorizontalReviewData(false).catch(function(){});
             }
