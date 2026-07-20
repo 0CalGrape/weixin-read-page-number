@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书目录页码与阅读进度
 // @namespace    https://github.com/0CalEmotion
-// @version      1.1
+// @version      1.2
 // @description  在微信读书网页版目录中显示章节页码，并在顶部显示当前阅读进度。
 // @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
@@ -60,7 +60,7 @@
             .lv-top-progress {
                 display: flex;
                 align-items: center;
-                gap: 10px;
+                gap: 18px;
                 margin: 0 24px;
                 padding: 6px 12px;
                 border-radius: 999px;
@@ -77,12 +77,6 @@
                 font-weight: 600;
             }
 
-            .lv-top-progress .lv-top-progress-sep {
-                width: 1px;
-                height: 10px;
-                background: rgba(255, 255, 255, 0.12);
-            }
-
             .wr_whiteTheme .lv-top-progress {
                 background: rgba(36, 41, 47, 0.08);
                 color: #24292f;
@@ -90,10 +84,6 @@
 
             .wr_whiteTheme .lv-top-progress strong {
                 color: #1f2328;
-            }
-
-            .wr_whiteTheme .lv-top-progress .lv-top-progress-sep {
-                background: rgba(36, 41, 47, 0.18);
             }
 
             .lv-page-meta {
@@ -764,11 +754,7 @@
             topBarInner.insertBefore(node, nav);
         }
 
-        node.innerHTML = [
-            `<span>本章 ${current.currentChapterPage}/${current.currentChapterPageCount},${current.chapterProgressPercent}%</span>`,
-            '<span>|</span>',
-            `<span>全书 ${current.currentPage}/${current.totalPages},${current.bookProgressPercent}%</span>`
-        ].join('');
+        node.textContent = `本章 ${current.currentChapterPage}/${current.currentChapterPageCount} ${current.chapterProgressPercent}% 全书 ${current.currentPage}/${current.totalPages} ${current.bookProgressPercent}%`;
     }
 
     function getChapterProgress(chapter, measurement) {
