@@ -60,7 +60,7 @@
             .lv-top-progress {
                 display: flex;
                 align-items: center;
-                gap: 18px;
+                gap: 9px;
                 margin: 0 24px;
                 padding: 6px 12px;
                 border-radius: 999px;
@@ -70,6 +70,29 @@
                 line-height: 1;
                 white-space: nowrap;
                 flex-shrink: 0;
+                font-variant-numeric: tabular-nums;
+                font-feature-settings: "tnum";
+            }
+
+            .lv-top-progress-group {
+                display: grid;
+                align-items: center;
+                column-gap: 3px;
+            }
+
+            .lv-top-progress-group-chapter {
+                grid-template-columns: 2em var(--lv-chapter-page-width, 5ch) 6ch;
+            }
+
+            .lv-top-progress-group-book {
+                grid-template-columns: 2em var(--lv-book-page-width, 7ch) 7ch;
+            }
+
+            .lv-top-progress-cell {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                min-width: 0;
             }
 
             .lv-top-progress strong {
@@ -603,6 +626,10 @@
         const totalPages = pagination[pagination.length - 1]
             ? pagination[pagination.length - 1].endPage
             : currentChapter.endPage;
+        const maxChapterPageCount = pagination.reduce(
+            (maxPageCount, chapter) => Math.max(maxPageCount, Number(chapter.pageCount || 1)),
+            currentChapter.pageCount
+        );
         const bookProgressPercent = getBookProgressPercent(
             currentPage,
             totalPages,
@@ -614,6 +641,7 @@
             currentPage,
             currentChapterPage,
             currentChapterPageCount: currentChapter.pageCount,
+            maxChapterPageCount,
             chapterProgressPercent,
             bookProgressPercent,
             currentChapterEndPage: currentChapter.endPage,
@@ -754,7 +782,22 @@
             topBarInner.insertBefore(node, nav);
         }
 
-        node.textContent = `本章 ${current.currentChapterPage}/${current.currentChapterPageCount} ${current.chapterProgressPercent}% 全书 ${current.currentPage}/${current.totalPages} ${current.bookProgressPercent}%`;
+        const chapterPageDigits = String(Math.max(1, Number(current.maxChapterPageCount || current.currentChapterPageCount))).length;
+        const bookPageDigits = String(Math.max(1, Number(current.totalPages))).length;
+        node.style.setProperty('--lv-chapter-page-width', `${chapterPageDigits * 2 + 1}ch`);
+        node.style.setProperty('--lv-book-page-width', `${bookPageDigits * 2 + 1}ch`);
+        node.innerHTML = [
+            '<span class="lv-top-progress-group lv-top-progress-group-chapter">',
+            '<span class="lv-top-progress-cell">本章</span>',
+            `<span class="lv-top-progress-cell">${current.currentChapterPage}/${current.currentChapterPageCount}</span>`,
+            `<span class="lv-top-progress-cell">${current.chapterProgressPercent}%</span>`,
+            '</span>',
+            '<span class="lv-top-progress-group lv-top-progress-group-book">',
+            '<span class="lv-top-progress-cell">全书</span>',
+            `<span class="lv-top-progress-cell">${current.currentPage}/${current.totalPages}</span>`,
+            `<span class="lv-top-progress-cell">${current.bookProgressPercent}%</span>`,
+            '</span>'
+        ].join('');
     }
 
     function getChapterProgress(chapter, measurement) {
