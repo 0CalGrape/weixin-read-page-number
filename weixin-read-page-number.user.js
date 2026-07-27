@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书目录页码与阅读进度
 // @namespace    https://github.com/0CalEmotion
-// @version      1.3
+// @version      1.4
 // @description  在微信读书网页版目录中显示章节页码，并在顶部显示当前阅读进度。
 // @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
@@ -189,7 +189,7 @@
             }
 
             runtime.pendingCatalogJump = {
-                title: normalizeText(title),
+                title: getChapterMatchKey(title),
                 at: Date.now()
             };
         }, true);
@@ -297,7 +297,7 @@
 
         runtime.pageTurnIntent = {
             direction,
-            chapterKey: normalizeText(chapterTitle),
+            chapterKey: getChapterMatchKey(chapterTitle),
             at: Date.now(),
             optimisticApplied: Boolean(expectedPage > 0),
             expectedPage: Number(expectedPage || 0)
@@ -310,7 +310,7 @@
         }
 
         const pagination = buildPagination(runtime.chapters);
-        const chapter = pagination.find((item) => normalizeText(item.title) === normalizeText(chapterTitle));
+        const chapter = findCurrentChapter(pagination, chapterTitle);
         if (!chapter) {
             return 0;
         }
@@ -366,7 +366,7 @@
             nearBottom: false
         };
         const pagination = buildPagination(runtime.chapters);
-        const currentIndex = pagination.findIndex((item) => normalizeText(item.title) === normalizeText(chapterTitle));
+        const currentIndex = findCurrentChapterIndex(pagination, chapterTitle);
         if (currentIndex < 0) {
             return;
         }
@@ -399,7 +399,7 @@
 
         runtime.chapterTurnIntent = {
             direction,
-            targetChapterKey: normalizeText(targetChapter.title),
+            targetChapterKey: getChapterMatchKey(targetChapter.title),
             targetPage,
             at: Date.now()
         };
@@ -444,7 +444,7 @@
         }
 
         const chapterTitle = getCurrentChapterTitle();
-        const chapterKey = normalizeText(chapterTitle);
+        const chapterKey = getChapterMatchKey(chapterTitle);
         if (chapterKey && chapterKey !== runtime.activeChapterKey) {
             runtime.activeChapterKey = chapterKey;
             runtime.pageTurnIntent = null;
@@ -516,18 +516,42 @@
                 ? payload.data[0].updated
                 : [];
 
-            runtime.chapters = updated.map((chapter) => ({
+            const apiChapters = updated.map((chapter) => ({
                 chapterUid: String(chapter.chapterUid),
                 title: chapter.title || '',
                 level: Number(chapter.level || 1),
                 wordCount: Number(chapter.wordCount || 0),
                 fileCount: Array.isArray(chapter.files) && chapter.files.length > 0 ? chapter.files.length : 1
             }));
+
+            runtime.chapters = apiChapters.length > 0
+                ? apiChapters
+                : readCatalogChapters();
         } catch (error) {
             console.warn('[lv-weread] failed to fetch chapter infos', error);
+            runtime.chapters = readCatalogChapters();
         } finally {
             runtime.fetchingChapters = false;
         }
+    }
+
+    function readCatalogChapters() {
+        return Array.from(document.querySelectorAll('.readerCatalog_list > .readerCatalog_list_item'))
+            .map((item, index) => {
+                const title = item.querySelector('.readerCatalog_list_item_title_text')?.textContent?.trim() || '';
+                if (!title) {
+                    return null;
+                }
+
+                return {
+                    chapterUid: `catalog-${index + 1}`,
+                    title,
+                    level: getCatalogLevel(item),
+                    wordCount: 0,
+                    fileCount: 1
+                };
+            })
+            .filter(Boolean);
     }
 
     function getCurrentChapterTitle() {
@@ -609,8 +633,7 @@
             return null;
         }
 
-        const normalizedCurrentTitle = normalizeText(currentChapterTitle);
-        const currentChapter = pagination.find((chapter) => normalizeText(chapter.title) === normalizedCurrentTitle);
+        const currentChapter = findCurrentChapter(pagination, currentChapterTitle);
         if (!currentChapter) {
             return null;
         }
@@ -649,6 +672,27 @@
             chapterSegmentCount: chapterProgress.segmentCount,
             totalPages
         };
+    }
+
+    function findCurrentChapter(pagination, currentChapterTitle) {
+        const index = findCurrentChapterIndex(pagination, currentChapterTitle);
+        return index >= 0 ? pagination[index] : null;
+    }
+
+    function findCurrentChapterIndex(pagination, currentChapterTitle) {
+        const matchedIndex = pagination.findIndex((chapter) => chapterTitlesMatch(chapter.title, currentChapterTitle));
+        if (matchedIndex >= 0) {
+            return matchedIndex;
+        }
+
+        const selectedItem = document.querySelector('.readerCatalog_list_item_selected');
+        if (!selectedItem) {
+            return -1;
+        }
+
+        const catalogItems = Array.from(document.querySelectorAll('.readerCatalog_list > .readerCatalog_list_item'));
+        const selectedIndex = catalogItems.indexOf(selectedItem);
+        return selectedIndex >= 0 && selectedIndex < pagination.length ? selectedIndex : -1;
     }
 
     function getChapterProgressPercent(currentPage, pageCount, scrollProgressRatio) {
@@ -747,11 +791,9 @@
     }
 
     function takeSequentialMatch(lookup, title, level) {
-        const normalizedTitle = normalizeText(title);
-
         for (let index = lookup.cursor; index < lookup.rows.length; index += 1) {
             const row = lookup.rows[index];
-            if (normalizeText(row.title) === normalizedTitle && Number(row.level || 1) === Number(level || 1)) {
+            if (chapterTitlesMatch(row.title, title) && Number(row.level || 1) === Number(level || 1)) {
                 lookup.cursor = index + 1;
                 return row;
             }
@@ -759,7 +801,7 @@
 
         for (let index = lookup.cursor; index < lookup.rows.length; index += 1) {
             const row = lookup.rows[index];
-            if (normalizeText(row.title) === normalizedTitle) {
+            if (chapterTitlesMatch(row.title, title)) {
                 lookup.cursor = index + 1;
                 return row;
             }
@@ -817,15 +859,15 @@
         const nearTop = scrollTop <= Math.max(140, viewportHeight * 0.35);
         const signature = String(measurement.trackerSignature || '');
         const pendingCatalogJump = runtime.pendingCatalogJump
-            && runtime.pendingCatalogJump.title === normalizeText(chapter.title)
+            && runtime.pendingCatalogJump.title === getChapterMatchKey(chapter.title)
             && Date.now() - Number(runtime.pendingCatalogJump.at || 0) <= 5000;
         const pendingTurnIntent = runtime.pageTurnIntent
-            && runtime.pageTurnIntent.chapterKey === normalizeText(chapter.title)
+            && runtime.pageTurnIntent.chapterKey === getChapterMatchKey(chapter.title)
             && Date.now() - Number(runtime.pageTurnIntent.at || 0) <= 2500
             ? runtime.pageTurnIntent
             : null;
         const pendingChapterTurn = runtime.chapterTurnIntent
-            && runtime.chapterTurnIntent.targetChapterKey === normalizeText(chapter.title)
+            && runtime.chapterTurnIntent.targetChapterKey === getChapterMatchKey(chapter.title)
             && Date.now() - Number(runtime.chapterTurnIntent.at || 0) <= 5000
             ? runtime.chapterTurnIntent
             : null;
@@ -1029,6 +1071,22 @@
             .replace(/\s+/g, '')
             .replace(/[\u00b7\u2022\u30fb]/g, '')
             .trim();
+    }
+
+    function getChapterMatchKey(text) {
+        const normalized = normalizeText(text);
+        const withoutOrdinalPrefix = normalized.replace(
+            /^第(?:[0-9０-９]+|[零〇一二三四五六七八九十百千万两廿卅]+)(?:章|节|回|卷|部|篇|幕|集|册|话)(?:[:：、,.，．\-—_]+)?/,
+            ''
+        );
+        return withoutOrdinalPrefix || normalized;
+    }
+
+    function chapterTitlesMatch(left, right) {
+        const normalizedLeft = normalizeText(left);
+        const normalizedRight = normalizeText(right);
+        return normalizedLeft === normalizedRight
+            || getChapterMatchKey(left) === getChapterMatchKey(right);
     }
 
     function clamp(value, min, max) {
