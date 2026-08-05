@@ -2,7 +2,7 @@
 // @name         微信读书宽屏工具
 // @icon         https://weread.qq.com/favicon.ico
 // @namespace    https://greasyfork.org/users/878514
-// @version      20260719.18
+// @version      20260805.2
 // @description  调整滚动阅读宽度和目录位置，并为滚动、双栏阅读提供统一的自动阅读控件。
 // @author       Velens
 // @match        https://weread.qq.com/web/reader/*
@@ -34,6 +34,8 @@
     const REVIEW_BATCH_SIZE = 12;
     const REVIEW_BATCH_DELAY_MS = 150;
     const REVIEW_CONTENT_STABLE_MS = 2200;
+    const SCROLL_FRAMES_PER_SECOND = 120;
+    const SCROLL_FRAME_INTERVAL_MS = 1000 / SCROLL_FRAMES_PER_SECOND;
 
     let widthIndex = normalizeIndex(GM_getValue('numw', 1), widths.length);
     let scrollbarIndex = normalizeIndex(GM_getValue('nums', 0), scrollbarOptions.length);
@@ -523,8 +525,10 @@
         controls.append(toggleButton, speedButton);
 
         let playing = false;
-        let animationFrameId = 0;
+        let scrollIntervalId = 0;
         let lastFrameTime = 0;
+        let targetScrollTop = null;
+        let lastObservedScrollTop = 0;
         let stopTimer = 0;
         let pageTimer = 0;
         let toggleClickTimer = 0;
@@ -533,12 +537,12 @@
         let topHoldUntil = 0;
         const legacyScrollStep = clampNumber(GM_getValue('ynumDown', 1), -1000, 1000, 1);
         const legacyIntervalMs = clampNumber(GM_getValue('timeMillisec', 20), 1, Number.MAX_SAFE_INTEGER, 20);
-        let scrollPixelsPerSecond = clampNumber(
-            GM_getValue('scrollPixelsPerSecond', legacyScrollStep * 1000 / legacyIntervalMs),
-            -10000,
-            10000,
-            50
+        const savedScrollPixelsPerSecond = Number(
+            GM_getValue('scrollPixelsPerSecond', legacyScrollStep * 1000 / legacyIntervalMs)
         );
+        let scrollPixelsPerSecond = Number.isFinite(savedScrollPixelsPerSecond)
+            ? savedScrollPixelsPerSecond
+            : 50;
         let pageDelayMs = clampNumber(GM_getValue('timePagesec', 10000), 1000, Number.MAX_SAFE_INTEGER, 10000);
         let topDelayMs = clampNumber(GM_getValue('timeTopsec', 0), 0, Number.MAX_SAFE_INTEGER, 0);
 
@@ -547,26 +551,29 @@
             toggleButton.title = playing
                 ? `时长：${timeStopMinutes}（双击修改）`
                 : `停留：${topDelayMs}（双击修改）`;
-            speedButton.title = `速度：${scrollPixelsPerSecond} 像素/秒（按屏幕刷新率平滑执行；双击改翻页）`;
+            speedButton.title = `速度：${scrollPixelsPerSecond} 像素/秒（固定 120 帧/秒；双击改翻页）`;
         };
         const stop = () => {
             playing = false;
             pageTurnScheduled = false;
-            window.cancelAnimationFrame(animationFrameId);
+            window.clearInterval(scrollIntervalId);
             window.clearTimeout(stopTimer);
             window.clearTimeout(pageTimer);
-            animationFrameId = 0;
+            scrollIntervalId = 0;
             lastFrameTime = 0;
+            targetScrollTop = null;
+            lastObservedScrollTop = 0;
             stopTimer = 0;
             pageTimer = 0;
             update();
         };
-        const tick = (frameTime) => {
+        const tick = () => {
             if (!document.contains(controls) || isHorizontalReader()) {
                 stop();
                 return;
             }
 
+            const frameTime = window.performance?.now?.() ?? Date.now();
             if (!lastFrameTime) {
                 lastFrameTime = frameTime;
             }
@@ -581,15 +588,19 @@
                     topHoldUntil = Date.now() + topDelayMs;
                 }
                 if (Date.now() < topHoldUntil) {
-                    animationFrameId = window.requestAnimationFrame(tick);
                     return;
                 }
             } else {
                 topHoldUntil = 0;
             }
 
-            window.scrollBy(0, scrollPixelsPerSecond * elapsedMs / 1000);
+            if (targetScrollTop === null || Math.abs(scrollTop - lastObservedScrollTop) > 2) {
+                targetScrollTop = scrollTop;
+            }
+            targetScrollTop += scrollPixelsPerSecond * elapsedMs / 1000;
+            window.scrollTo(0, targetScrollTop);
             const nextScrollTop = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+            lastObservedScrollTop = nextScrollTop;
             if (nextScrollTop >= scrollHeight - 10) {
                 if (!pageTurnScheduled) {
                     pageTurnScheduled = true;
@@ -599,16 +610,17 @@
                 pageTurnScheduled = false;
                 window.clearTimeout(pageTimer);
             }
-            animationFrameId = window.requestAnimationFrame(tick);
         };
         const start = () => {
             playing = true;
             pageTurnScheduled = false;
             topHoldUntil = 0;
             lastFrameTime = 0;
-            window.cancelAnimationFrame(animationFrameId);
+            targetScrollTop = null;
+            lastObservedScrollTop = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+            window.clearInterval(scrollIntervalId);
             window.clearTimeout(stopTimer);
-            animationFrameId = window.requestAnimationFrame(tick);
+            scrollIntervalId = window.setInterval(tick, SCROLL_FRAME_INTERVAL_MS);
             if (timeStopMinutes > 0) {
                 stopTimer = window.setTimeout(stop, timeStopMinutes * 60000);
             }
@@ -654,10 +666,11 @@
                     return;
                 }
 
-                scrollPixelsPerSecond = clamp(value, -10000, 10000);
+                scrollPixelsPerSecond = value;
                 GM_setValue('scrollPixelsPerSecond', scrollPixelsPerSecond);
                 if (playing) {
                     lastFrameTime = 0;
+                    targetScrollTop = null;
                 }
                 update();
             }, 250);
