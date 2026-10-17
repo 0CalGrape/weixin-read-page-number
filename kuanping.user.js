@@ -2,10 +2,12 @@
 // @name         微信读书宽屏工具
 // @icon         https://weread.qq.com/favicon.ico
 // @namespace    https://greasyfork.org/users/878514
-// @version      20261017.1
-// @description  调整滚动阅读宽度和目录位置，提供自动阅读控件与点击正文定位记号。
+// @version      20261017.4
+// @description  调整滚动阅读宽度和目录位置，提供自动阅读控件与点击文字整句划线。
 // @author       Velens
 // @match        https://weread.qq.com/web/reader/*
+// @run-at       document-start
+// @grant        unsafeWindow
 // @license      MIT
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
@@ -17,6 +19,9 @@
 
 (function () {
     'use strict';
+
+    const canvasReadingText = new WeakMap();
+    installCanvasReadingCapture();
 
     const widths = [
         { title: '满列', width: '100%' },
@@ -69,36 +74,35 @@
     let readingMarkEnabled = GM_getValue('readingMarkEnabled', true) !== false;
     let readingMark = null;
     let readingMarkNode = null;
-    let readingMarkTimer = 0;
 
-    installStyles();
-    registerMenus();
-    installKeyboardShortcuts();
-    installReadingMark();
-    startDomObserver();
-    scheduleDomRefresh();
+    function bootstrapReaderTools() {
+        installStyles();
+        registerMenus();
+        installKeyboardShortcuts();
+        installReadingMark();
+        startDomObserver();
+        scheduleDomRefresh();
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bootstrapReaderTools, { once: true });
+    } else {
+        bootstrapReaderTools();
+    }
 
     function installStyles() {
         GM_addStyle(`
             .lv-reading-position {
                 position: fixed;
+                inset: 0;
                 z-index: 100;
-                width: 32px;
-                height: 3px;
-                border-radius: 3px;
-                background: #e5a43b;
-                box-shadow: 0 0 0 1px rgba(0, 0, 0, .15);
                 pointer-events: none;
             }
-            .lv-reading-position::before {
-                content: '';
+            .lv-reading-position-line {
                 position: absolute;
-                left: -3px;
-                top: -2px;
-                width: 7px;
-                height: 7px;
-                border-radius: 50%;
-                background: inherit;
+                height: 2px;
+                border-radius: 2px;
+                background: #ff9800;
+                pointer-events: none;
             }
             .lv-reading-position[hidden] { display: none !important; }
             .readerControls .readMark[aria-pressed="true"] .iconRead { color: #d99b32; }
@@ -242,8 +246,8 @@
     }
 
     function registerMenus() {
-        GM_registerMenuCommand('点击定位：开启 / 关闭', toggleReadingMark);
-        GM_registerMenuCommand('清除阅读定位记号（Esc）', clearReadingMark);
+        GM_registerMenuCommand('点击整句划线：开启 / 关闭', toggleReadingMark);
+        GM_registerMenuCommand('清除整句划线（Esc）', clearReadingMark);
         GM_registerMenuCommand(`宽度：${widths[widthIndex].title}`, () => {
             widthIndex = (widthIndex + 1) % widths.length;
             GM_setValue('numw', widthIndex);
@@ -336,7 +340,7 @@
 
     function startDomObserver() {
         const observer = new MutationObserver((mutations) => {
-            if (readingMark && mutations.some((mutation) => {
+            if (readingMark && !readingMark.canvasRects && mutations.some((mutation) => {
                 const target = mutation.target instanceof Element
                     ? mutation.target : mutation.target.parentElement;
                 return target && readingMark.host.contains(target)
@@ -468,7 +472,7 @@
         }
     }
 
-    // Store a content-relative point, not a viewport point, so scrolling carries it with the page.
+    // Keep DOM text ranges so wrapped sentences follow their actual glyph positions.
     function installReadingMark() {
         let press = null;
         const excluded = 'a, button, input, textarea, select, [role="button"], [contenteditable]:not([contenteditable="false"]), .readerControls, .lv-review-underline-layer, .lv-review-native-panel';
@@ -477,38 +481,47 @@
         }, true);
         document.addEventListener('pointercancel', () => { press = null; }, true);
         document.addEventListener('click', (event) => {
-            window.clearTimeout(readingMarkTimer);
             const start = press;
             press = null;
             if (!readingMarkEnabled || !start || event.button !== 0 || event.detail > 1
                 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
                 || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5
                 || !(event.target instanceof Element) || event.target.closest(excluded)
-                || isEditableTarget(event.target) || !window.getSelection()?.isCollapsed) return;
+                || isEditableTarget(event.target)) return;
             const host = event.target.closest('.renderTargetContent, .readerChapterContent');
             if (!host) return;
-            const rect = host.getBoundingClientRect();
-            const mark = {
-                host, x: event.clientX - rect.left, y: event.clientY - rect.top,
-                width: rect.width, height: rect.height,
-                key: location.href + '|' + getCurrentReviewChapterTitle()
-            };
-            readingMarkTimer = window.setTimeout(() => {
-                if (!readingMarkEnabled || !window.getSelection()?.isCollapsed) return;
-                readingMark = mark;
-                renderReadingMark();
-            }, 250);
+            const hit = findReadingCharacter(host, event.clientX, event.clientY);
+            if (!hit) {
+                const canvasMark = findCanvasReadingSentence(host, event.clientX, event.clientY);
+                if (canvasMark) {
+                    readingMark = canvasMark;
+                    renderReadingMark();
+                }
+                return;
+            }
+            const paragraph = hit.node.parentElement.closest('p, h1, h2, h3, h4, h5, h6, li, blockquote');
+            const scope = paragraph && host.contains(paragraph) ? paragraph : host;
+            const index = buildReviewTextIndex(scope);
+            const entry = index.nodes.find((item) => item.node === hit.node);
+            if (!entry) return;
+            const bounds = findReadingSentence(index.text, entry.start + hit.offset);
+            const startPoint = locateReviewTextOffset(index.nodes, bounds.start, false);
+            const endPoint = locateReviewTextOffset(index.nodes, bounds.end, true);
+            if (!startPoint || !endPoint) return;
+            const range = document.createRange();
+            range.setStart(startPoint.node, startPoint.offset);
+            range.setEnd(endPoint.node, endPoint.offset);
+            readingMark = { host, range, key: location.href + '|' + getCurrentReviewChapterTitle() };
+            renderReadingMark();
         }, true);
-        document.addEventListener('dblclick', () => window.clearTimeout(readingMarkTimer), true);
         document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape' && !isEditableTarget(event.target)) clearReadingMark();
         });
         window.addEventListener('scroll', renderReadingMark, { passive: true, capture: true });
-        window.addEventListener('resize', clearReadingMark, { passive: true });
+        window.addEventListener('resize', renderReadingMark, { passive: true });
     }
 
     function clearReadingMark() {
-        window.clearTimeout(readingMarkTimer);
         readingMark = null;
         if (readingMarkNode) readingMarkNode.hidden = true;
     }
@@ -524,18 +537,239 @@
         document.querySelectorAll('.readerControls .readMark').forEach((button) => {
             button.setAttribute('aria-pressed', String(readingMarkEnabled));
             button.title = readingMarkEnabled
-                ? '点击定位已开启：点击正文留下记号，Esc 清除；点击此按钮关闭'
-                : '点击开启正文定位记号';
-            setControlText(button, readingMarkEnabled ? '定位开' : '定位关');
+                ? '整句划线已开启：点击文字划线当前句，Esc 清除；点击此按钮关闭'
+                : '点击开启整句划线';
+            setControlText(button, readingMarkEnabled ? '划线开' : '划线关');
         });
+    }
+
+    // The live reader uses canvas-only text. Capture drawing geometry before its first render.
+    // No book requests, OCR, or changes to the reader's drawing output are needed.
+    function installCanvasReadingCapture() {
+        const page = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+        const transformRect = (matrix, x, y, width, height) => {
+            const points = [[x, y], [x + width, y], [x, y + height], [x + width, y + height]]
+                .map(([px, py]) => ({ x: matrix.a * px + matrix.c * py + matrix.e,
+                    y: matrix.b * px + matrix.d * py + matrix.f }));
+            return { left: Math.min(...points.map((p) => p.x)), right: Math.max(...points.map((p) => p.x)),
+                top: Math.min(...points.map((p) => p.y)), bottom: Math.max(...points.map((p) => p.y)) };
+        };
+        const stateFor = (canvas) => {
+            let state = canvasReadingText.get(canvas);
+            if (!state || state.width !== canvas.width || state.height !== canvas.height) {
+                state = { width: canvas.width, height: canvas.height, glyphs: [], version: (state?.version || 0) + 1 };
+                canvasReadingText.set(canvas, state);
+            }
+            return state;
+        };
+        const prototypes = new Set([page.CanvasRenderingContext2D?.prototype, page.OffscreenCanvasRenderingContext2D?.prototype]);
+        for (const proto of prototypes) {
+            if (!proto) continue;
+            const wrap = (name, capture) => {
+                const original = proto[name];
+                if (!original) return;
+                proto[name] = function (...args) {
+                    const result = Reflect.apply(original, this, args);
+                    // A capture failure must never break the site's renderer.
+                    try { capture(this, args); } catch (error) { /* Unsupported drawing operation. */ }
+                    return result;
+                };
+            };
+            wrap('fillText', (ctx, [value, x, y, maxWidth]) => {
+                if (!ctx.globalAlpha) return;
+                const text = String(value);
+                if (!text.trim()) return;
+                const metrics = ctx.measureText(text);
+                const scale = maxWidth > 0 && metrics.width > maxWidth ? maxWidth / metrics.width : 1;
+                const align = ctx.textAlign;
+                const rtl = ctx.direction === 'rtl';
+                const shift = align === 'center' ? metrics.width / 2
+                    : align === 'right' || (align === 'end' && !rtl) || (align === 'start' && rtl) ? metrics.width : 0;
+                const matrix = ctx.getTransform();
+                const state = stateFor(ctx.canvas);
+                let prefix = '';
+                for (const character of text) {
+                    const left = ctx.measureText(prefix).width;
+                    const glyph = ctx.measureText(character);
+                    const width = glyph.width * scale;
+                    const ascent = metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent;
+                    const descent = metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent;
+                    const box = transformRect(matrix, Number(x) + (left - shift) * scale,
+                        Number(y) - ascent, width, Math.max(1, ascent + descent));
+                    state.glyphs.push({ text: character, ...box });
+                    prefix += character;
+                }
+                state.version += 1;
+            });
+            wrap('clearRect', (ctx, [x, y, width, height]) => {
+                const state = stateFor(ctx.canvas);
+                const box = transformRect(ctx.getTransform(), x, y, width, height);
+                state.glyphs = state.glyphs.filter((g) => g.right <= box.left || g.left >= box.right
+                    || g.bottom <= box.top || g.top >= box.bottom);
+                state.version += 1;
+            });
+            wrap('reset', (ctx) => {
+                const state = stateFor(ctx.canvas);
+                state.glyphs = [];
+                state.version += 1;
+            });
+            // Preserve glyph positions when the renderer copies a temporary canvas to the visible one.
+            wrap('drawImage', (ctx, args) => {
+                const source = args[0];
+                const input = canvasReadingText.get(source);
+                if (!input?.glyphs.length || input.width !== source.width || input.height !== source.height) return;
+                let sx = 0, sy = 0, sw = source.width, sh = source.height;
+                let dx = args[1], dy = args[2], dw = sw, dh = sh;
+                if (args.length === 5) { dw = args[3]; dh = args[4]; }
+                if (args.length === 9) [, sx, sy, sw, sh, dx, dy, dw, dh] = args;
+                if (!sw || !sh) return;
+                const state = stateFor(ctx.canvas);
+                const matrix = ctx.getTransform();
+                const copies = input.glyphs.filter((g) => g.left >= sx && g.right <= sx + sw
+                    && g.top >= sy && g.bottom <= sy + sh).map((g) => ({ text: g.text,
+                    ...transformRect(matrix, dx + (g.left - sx) * dw / sw, dy + (g.top - sy) * dh / sh,
+                        (g.right - g.left) * dw / sw, (g.bottom - g.top) * dh / sh) }));
+                state.glyphs.push(...copies);
+                state.version += 1;
+            });
+        }
+    }
+
+    function canvasGlyphClientRect(glyph) {
+        const rect = glyph.canvas.getBoundingClientRect();
+        const scaleX = rect.width / glyph.canvas.width;
+        const scaleY = rect.height / glyph.canvas.height;
+        const left = rect.left + glyph.left * scaleX;
+        const top = rect.top + glyph.top * scaleY;
+        const width = (glyph.right - glyph.left) * scaleX;
+        const height = (glyph.bottom - glyph.top) * scaleY;
+        return { left, top, right: left + width, bottom: top + height, width, height };
+    }
+
+    function findCanvasReadingSentence(host, x, y) {
+        const glyphs = [];
+        const canvasVersions = [];
+        const canvases = Array.from(host.querySelectorAll('canvas'));
+        const clickedCanvas = canvases.find((canvas) => {
+            const rect = canvas.getBoundingClientRect();
+            return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+        });
+        const clickedRect = clickedCanvas?.getBoundingClientRect();
+        for (const canvas of canvases) {
+            const state = canvasReadingText.get(canvas);
+            if (!state || state.width !== canvas.width || state.height !== canvas.height) continue;
+            const rect = canvas.getBoundingClientRect();
+            if (!rect.width || !rect.height) continue;
+            if (clickedRect && (rect.right <= clickedRect.left || rect.left >= clickedRect.right)) continue;
+            canvasVersions.push({ canvas, version: state.version, width: canvas.width, height: canvas.height });
+            for (const item of state.glyphs) {
+                const glyph = { ...item, canvas };
+                glyph.rect = canvasGlyphClientRect(glyph);
+                glyphs.push(glyph);
+            }
+        }
+        // Sort by physical reading order: canvas draw calls may arrive out of order.
+        glyphs.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+        const rows = [];
+        for (const glyph of glyphs) {
+            const center = (glyph.rect.top + glyph.rect.bottom) / 2;
+            let row = rows[rows.length - 1];
+            if (!row || Math.abs(center - row.center) > Math.max(3, glyph.rect.height * .45)) {
+                row = { center, glyphs: [] };
+                rows.push(row);
+            }
+            row.glyphs.push(glyph);
+        }
+        let text = '';
+        const entries = [];
+        for (const row of rows) {
+            row.glyphs.sort((a, b) => a.rect.left - b.rect.left);
+            let previous = null;
+            for (const glyph of row.glyphs) {
+                if (previous && glyph.text === previous.text && Math.abs(glyph.rect.left - previous.rect.left) < 1) continue;
+                // A large horizontal gap separates columns or distinct text blocks.
+                if (previous && glyph.rect.left - previous.rect.right > glyph.rect.height * 2) text += '\n';
+                entries.push({ glyph, start: text.length, end: text.length + glyph.text.length });
+                text += glyph.text;
+                previous = glyph;
+            }
+        }
+        const hit = entries.find(({ glyph: { rect: r } }) => x >= r.left && x <= r.right
+            && y >= r.top - 3 && y <= r.bottom + 3);
+        if (!hit) return null;
+        const bounds = findReadingSentence(text, hit.start);
+        const canvasRects = entries.filter((item) => item.start < bounds.end && item.end > bounds.start).map((item) => item.glyph);
+        return { host, canvasRects, canvasVersions, key: location.href + '|' + getCurrentReviewChapterTitle() };
+    }
+
+    function findReadingCharacter(host, x, y) {
+        const containsPoint = (rect) => rect.width > 0 && rect.height > 0
+            && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+        const probe = document.createRange();
+        const hitCharacter = (node, offsets) => {
+            for (const offset of offsets) {
+                if (offset < 0 || offset >= node.length || /\s/.test(node.nodeValue[offset])) continue;
+                probe.setStart(node, offset);
+                probe.setEnd(node, offset + 1);
+                if (Array.from(probe.getClientRects()).some(containsPoint)) return { node, offset };
+            }
+            return null;
+        };
+        const caret = document.caretPositionFromPoint?.(x, y);
+        const fallback = !caret && document.caretRangeFromPoint?.(x, y);
+        const node = caret?.offsetNode || fallback?.startContainer;
+        const offset = caret?.offset ?? fallback?.startOffset;
+        if (node?.nodeType === Node.TEXT_NODE && host.contains(node)) {
+            const hit = hitCharacter(node, [offset, offset - 1]);
+            if (hit) return hit;
+        }
+        // Some reader text layers do not receive pointer events. Match their actual rectangles.
+        for (const entry of buildReviewTextIndex(host).nodes) {
+            probe.selectNodeContents(entry.node);
+            if (!Array.from(probe.getClientRects()).some(containsPoint)) continue;
+            const hit = hitCharacter(entry.node, Array.from({ length: entry.node.length }, (_, i) => i));
+            if (hit) return hit;
+        }
+        return null;
+    }
+
+    function findReadingSentence(text, offset) {
+        // Every punctuation mark separates a reading fragment. Never underline separators:
+        // a spaced closing quote after a full stop must not become part of the next fragment.
+        const separator = (i) => {
+            const character = text[i];
+            if (character === '\n' || character === '\r') return true;
+            // Keep decimal numbers intact, e.g. 3.14.
+            if (character === '.' && /\d/.test(text[i - 1] || '') && /\d/.test(text[i + 1] || '')) return false;
+            return /\p{P}/u.test(character || '');
+        };
+        const fragments = [];
+        let start = 0;
+        for (let i = 0; i <= text.length; i += 1) {
+            if (i < text.length && !separator(i)) continue;
+            let end = i;
+            while (start < end && /\s/.test(text[start])) start += 1;
+            while (end > start && /\s/.test(text[end - 1])) end -= 1;
+            if (end > start) fragments.push({ start, end });
+            start = i + 1;
+        }
+        const containing = fragments.find((part) => offset >= part.start && offset < part.end);
+        if (containing) return containing;
+        // Clicking punctuation selects a neighbouring text fragment, never punctuation alone.
+        const before = fragments.filter((part) => part.end <= offset).pop();
+        const after = fragments.find((part) => part.start > offset);
+        if (/[[({（【《「『“‘]/u.test(text[offset] || '')) return after || before || { start: 0, end: 0 };
+        return before || after || { start: 0, end: 0 };
     }
 
     function renderReadingMark() {
         if (!readingMark) return;
-        const { host, x, y, width, height, key } = readingMark;
-        const rect = host.getBoundingClientRect();
-        if (!host.isConnected || key !== location.href + '|' + getCurrentReviewChapterTitle()
-            || Math.abs(width - rect.width) > 1 || Math.abs(height - rect.height) > 1) {
+        const { host, range, key, canvasRects, canvasVersions } = readingMark;
+        if (!host.isConnected || (range && (!host.contains(range.startContainer)
+            || !host.contains(range.endContainer) || range.collapsed))
+            || (canvasVersions && canvasVersions.some(({ canvas, version, width, height }) => !canvas.isConnected
+                || canvasReadingText.get(canvas)?.version !== version || canvas.width !== width || canvas.height !== height))
+            || key !== location.href + '|' + getCurrentReviewChapterTitle()) {
             clearReadingMark();
             return;
         }
@@ -545,12 +779,30 @@
             readingMarkNode.setAttribute('aria-hidden', 'true');
             document.body.append(readingMarkNode);
         }
-        const left = rect.left + x;
-        const top = rect.top + y + 8;
-        const hidden = top < 0 || top > window.innerHeight || left < 0 || left > window.innerWidth;
-        if (readingMarkNode.hidden !== hidden) readingMarkNode.hidden = hidden;
-        const css = `left: ${left}px; top: ${top}px;`;
-        if (readingMarkNode.style.cssText !== css) readingMarkNode.style.cssText = css;
+        const lines = [];
+        const rects = canvasRects ? canvasRects.map(canvasGlyphClientRect) : Array.from(range.getClientRects());
+        for (const rect of rects.filter((r) => r.width > 0 && r.height > 0)
+            .sort((a, b) => a.top - b.top || a.left - b.left)) {
+            const line = lines.find((item) => Math.abs(item.bottom - rect.bottom) < 3
+                && rect.left <= item.right + 3 && rect.right >= item.left - 3);
+            if (line) {
+                line.left = Math.min(line.left, rect.left);
+                line.right = Math.max(line.right, rect.right);
+            } else {
+                lines.push({ left: rect.left, right: rect.right, bottom: rect.bottom });
+            }
+        }
+        const layout = JSON.stringify(lines);
+        if (readingMarkNode.dataset.layout !== layout) {
+            readingMarkNode.dataset.layout = layout;
+            readingMarkNode.replaceChildren(...lines.map((line) => {
+                const node = document.createElement('div');
+                node.className = 'lv-reading-position-line';
+                node.style.cssText = `left: ${line.left}px; top: ${line.bottom + 1}px; width: ${line.right - line.left}px;`;
+                return node;
+            }));
+        }
+        if (readingMarkNode.hidden) readingMarkNode.hidden = false;
     }
 
     function initHorizontalAutoRead(controls) {
