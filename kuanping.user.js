@@ -2,8 +2,8 @@
 // @name         微信读书宽屏工具
 // @icon         https://weread.qq.com/favicon.ico
 // @namespace    https://greasyfork.org/users/878514
-// @version      20260805.2
-// @description  调整滚动阅读宽度和目录位置，并为滚动、双栏阅读提供统一的自动阅读控件。
+// @version      20261017.1
+// @description  调整滚动阅读宽度和目录位置，提供自动阅读控件与点击正文定位记号。
 // @author       Velens
 // @match        https://weread.qq.com/web/reader/*
 // @license      MIT
@@ -66,15 +66,42 @@
     let reviewPanelKeyHandler = null;
     const reviewDataCache = new Map();
     const initializedControls = new WeakMap();
+    let readingMarkEnabled = GM_getValue('readingMarkEnabled', true) !== false;
+    let readingMark = null;
+    let readingMarkNode = null;
+    let readingMarkTimer = 0;
 
     installStyles();
     registerMenus();
     installKeyboardShortcuts();
+    installReadingMark();
     startDomObserver();
     scheduleDomRefresh();
 
     function installStyles() {
         GM_addStyle(`
+            .lv-reading-position {
+                position: fixed;
+                z-index: 100;
+                width: 32px;
+                height: 3px;
+                border-radius: 3px;
+                background: #e5a43b;
+                box-shadow: 0 0 0 1px rgba(0, 0, 0, .15);
+                pointer-events: none;
+            }
+            .lv-reading-position::before {
+                content: '';
+                position: absolute;
+                left: -3px;
+                top: -2px;
+                width: 7px;
+                height: 7px;
+                border-radius: 50%;
+                background: inherit;
+            }
+            .lv-reading-position[hidden] { display: none !important; }
+            .readerControls .readMark[aria-pressed="true"] .iconRead { color: #d99b32; }
             body:not(.wr_whiteTheme) .readerChapterContent img.wr_readerImage_opacity,
             body:not(.wr_whiteTheme) .renderTargetContent img.wr_readerImage_opacity {
                 opacity: 1 !important;
@@ -215,6 +242,8 @@
     }
 
     function registerMenus() {
+        GM_registerMenuCommand('点击定位：开启 / 关闭', toggleReadingMark);
+        GM_registerMenuCommand('清除阅读定位记号（Esc）', clearReadingMark);
         GM_registerMenuCommand(`宽度：${widths[widthIndex].title}`, () => {
             widthIndex = (widthIndex + 1) % widths.length;
             GM_setValue('numw', widthIndex);
@@ -307,6 +336,14 @@
 
     function startDomObserver() {
         const observer = new MutationObserver((mutations) => {
+            if (readingMark && mutations.some((mutation) => {
+                const target = mutation.target instanceof Element
+                    ? mutation.target : mutation.target.parentElement;
+                return target && readingMark.host.contains(target)
+                    && !target.closest('.lv-review-underline-layer, .lv-review-native-panel');
+            })) {
+                clearReadingMark();
+            }
             if (mutations.some(mutationAffectsReviewText)) {
                 markReviewContentDirty();
             }
@@ -371,6 +408,7 @@
             shiftReaderPanels();
             document.querySelectorAll('.readerControls').forEach(initReaderControls);
             refreshScrollReviewMarks();
+            renderReadingMark();
         });
     }
 
@@ -416,6 +454,10 @@
 
         initializedControls.set(controls, mode);
         controls.querySelectorAll('.lv-reader-control').forEach((node) => node.remove());
+        const markButton = createTextControl('readMark', '定位');
+        markButton.addEventListener('click', toggleReadingMark);
+        controls.append(markButton);
+        updateReadingMarkControls();
         if (mode === 'horizontal') {
             initHorizontalAutoRead(controls);
         } else {
@@ -424,6 +466,91 @@
             hideScrollReviewMarks();
             initScrollAutoRead(controls);
         }
+    }
+
+    // Store a content-relative point, not a viewport point, so scrolling carries it with the page.
+    function installReadingMark() {
+        let press = null;
+        const excluded = 'a, button, input, textarea, select, [role="button"], [contenteditable]:not([contenteditable="false"]), .readerControls, .lv-review-underline-layer, .lv-review-native-panel';
+        document.addEventListener('pointerdown', (event) => {
+            press = event.button === 0 ? { x: event.clientX, y: event.clientY } : null;
+        }, true);
+        document.addEventListener('pointercancel', () => { press = null; }, true);
+        document.addEventListener('click', (event) => {
+            window.clearTimeout(readingMarkTimer);
+            const start = press;
+            press = null;
+            if (!readingMarkEnabled || !start || event.button !== 0 || event.detail > 1
+                || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
+                || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5
+                || !(event.target instanceof Element) || event.target.closest(excluded)
+                || isEditableTarget(event.target) || !window.getSelection()?.isCollapsed) return;
+            const host = event.target.closest('.renderTargetContent, .readerChapterContent');
+            if (!host) return;
+            const rect = host.getBoundingClientRect();
+            const mark = {
+                host, x: event.clientX - rect.left, y: event.clientY - rect.top,
+                width: rect.width, height: rect.height,
+                key: location.href + '|' + getCurrentReviewChapterTitle()
+            };
+            readingMarkTimer = window.setTimeout(() => {
+                if (!readingMarkEnabled || !window.getSelection()?.isCollapsed) return;
+                readingMark = mark;
+                renderReadingMark();
+            }, 250);
+        }, true);
+        document.addEventListener('dblclick', () => window.clearTimeout(readingMarkTimer), true);
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && !isEditableTarget(event.target)) clearReadingMark();
+        });
+        window.addEventListener('scroll', renderReadingMark, { passive: true, capture: true });
+        window.addEventListener('resize', clearReadingMark, { passive: true });
+    }
+
+    function clearReadingMark() {
+        window.clearTimeout(readingMarkTimer);
+        readingMark = null;
+        if (readingMarkNode) readingMarkNode.hidden = true;
+    }
+
+    function toggleReadingMark() {
+        readingMarkEnabled = !readingMarkEnabled;
+        GM_setValue('readingMarkEnabled', readingMarkEnabled);
+        clearReadingMark();
+        updateReadingMarkControls();
+    }
+
+    function updateReadingMarkControls() {
+        document.querySelectorAll('.readerControls .readMark').forEach((button) => {
+            button.setAttribute('aria-pressed', String(readingMarkEnabled));
+            button.title = readingMarkEnabled
+                ? '点击定位已开启：点击正文留下记号，Esc 清除；点击此按钮关闭'
+                : '点击开启正文定位记号';
+            setControlText(button, readingMarkEnabled ? '定位开' : '定位关');
+        });
+    }
+
+    function renderReadingMark() {
+        if (!readingMark) return;
+        const { host, x, y, width, height, key } = readingMark;
+        const rect = host.getBoundingClientRect();
+        if (!host.isConnected || key !== location.href + '|' + getCurrentReviewChapterTitle()
+            || Math.abs(width - rect.width) > 1 || Math.abs(height - rect.height) > 1) {
+            clearReadingMark();
+            return;
+        }
+        if (!readingMarkNode) {
+            readingMarkNode = document.createElement('div');
+            readingMarkNode.className = 'lv-reading-position';
+            readingMarkNode.setAttribute('aria-hidden', 'true');
+            document.body.append(readingMarkNode);
+        }
+        const left = rect.left + x;
+        const top = rect.top + y + 8;
+        const hidden = top < 0 || top > window.innerHeight || left < 0 || left > window.innerWidth;
+        if (readingMarkNode.hidden !== hidden) readingMarkNode.hidden = hidden;
+        const css = `left: ${left}px; top: ${top}px;`;
+        if (readingMarkNode.style.cssText !== css) readingMarkNode.style.cssText = css;
     }
 
     function initHorizontalAutoRead(controls) {
