@@ -2,7 +2,7 @@
 // @name         微信读书宽屏工具
 // @icon         https://weread.qq.com/favicon.ico
 // @namespace    https://greasyfork.org/users/878514
-// @version      20261017.4
+// @version      20261018.1
 // @description  调整滚动阅读宽度和目录位置，提供自动阅读控件与点击文字整句划线。
 // @author       Velens
 // @match        https://weread.qq.com/web/reader/*
@@ -71,7 +71,7 @@
     let reviewPanelKeyHandler = null;
     const reviewDataCache = new Map();
     const initializedControls = new WeakMap();
-    let readingMarkEnabled = GM_getValue('readingMarkEnabled', true) !== false;
+    let readingMarkEnabled = true; // Start enabled on each page load; avoid a forgotten saved-off state.
     let readingMark = null;
     let readingMarkNode = null;
 
@@ -105,7 +105,7 @@
                 pointer-events: none;
             }
             .lv-reading-position[hidden] { display: none !important; }
-            .readerControls .readMark[aria-pressed="true"] .iconRead { color: #d99b32; }
+            .readerControls .readMark .iconRead { opacity: .7 !important; }
             body:not(.wr_whiteTheme) .readerChapterContent img.wr_readerImage_opacity,
             body:not(.wr_whiteTheme) .renderTargetContent img.wr_readerImage_opacity {
                 opacity: 1 !important;
@@ -340,14 +340,6 @@
 
     function startDomObserver() {
         const observer = new MutationObserver((mutations) => {
-            if (readingMark && !readingMark.canvasRects && mutations.some((mutation) => {
-                const target = mutation.target instanceof Element
-                    ? mutation.target : mutation.target.parentElement;
-                return target && readingMark.host.contains(target)
-                    && !target.closest('.lv-review-underline-layer, .lv-review-native-panel');
-            })) {
-                clearReadingMark();
-            }
             if (mutations.some(mutationAffectsReviewText)) {
                 markReviewContentDirty();
             }
@@ -458,7 +450,7 @@
 
         initializedControls.set(controls, mode);
         controls.querySelectorAll('.lv-reader-control').forEach((node) => node.remove());
-        const markButton = createTextControl('readMark', '定位');
+        const markButton = createTextControl('readMark', '划线');
         markButton.addEventListener('click', toggleReadingMark);
         controls.append(markButton);
         updateReadingMarkControls();
@@ -488,30 +480,15 @@
                 || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5
                 || !(event.target instanceof Element) || event.target.closest(excluded)
                 || isEditableTarget(event.target)) return;
-            const host = event.target.closest('.renderTargetContent, .readerChapterContent');
+            const host = event.target.closest('.readerChapterContent')
+                || event.target.closest('.renderTargetContent');
             if (!host) return;
-            const hit = findReadingCharacter(host, event.clientX, event.clientY);
-            if (!hit) {
-                const canvasMark = findCanvasReadingSentence(host, event.clientX, event.clientY);
-                if (canvasMark) {
-                    readingMark = canvasMark;
-                    renderReadingMark();
-                }
-                return;
-            }
-            const paragraph = hit.node.parentElement.closest('p, h1, h2, h3, h4, h5, h6, li, blockquote');
-            const scope = paragraph && host.contains(paragraph) ? paragraph : host;
-            const index = buildReviewTextIndex(scope);
-            const entry = index.nodes.find((item) => item.node === hit.node);
-            if (!entry) return;
-            const bounds = findReadingSentence(index.text, entry.start + hit.offset);
-            const startPoint = locateReviewTextOffset(index.nodes, bounds.start, false);
-            const endPoint = locateReviewTextOffset(index.nodes, bounds.end, true);
-            if (!startPoint || !endPoint) return;
-            const range = document.createRange();
-            range.setStart(startPoint.node, startPoint.offset);
-            range.setEnd(endPoint.node, endPoint.offset);
-            readingMark = { host, range, key: location.href + '|' + getCurrentReviewChapterTitle() };
+            // Canvas text and positioned DOM text can coexist. Neither DOM order nor a
+            // single Range is reliable for the reader's shuffled character spans.
+            const mark = findCanvasReadingSentence(host, event.clientX, event.clientY)
+                || findDOMReadingSentence(host, event.clientX, event.clientY);
+            if (!mark) return;
+            readingMark = mark;
             renderReadingMark();
         }, true);
         document.addEventListener('keydown', (event) => {
@@ -528,7 +505,6 @@
 
     function toggleReadingMark() {
         readingMarkEnabled = !readingMarkEnabled;
-        GM_setValue('readingMarkEnabled', readingMarkEnabled);
         clearReadingMark();
         updateReadingMarkControls();
     }
@@ -539,7 +515,7 @@
             button.title = readingMarkEnabled
                 ? '整句划线已开启：点击文字划线当前句，Esc 清除；点击此按钮关闭'
                 : '点击开启整句划线';
-            setControlText(button, readingMarkEnabled ? '划线开' : '划线关');
+            setControlText(button, '划线');
         });
     }
 
@@ -668,7 +644,41 @@
                 glyphs.push(glyph);
             }
         }
-        // Sort by physical reading order: canvas draw calls may arrive out of order.
+        const selected = selectReadingGlyphs(glyphs, x, y);
+        if (!selected.length) return null;
+        const selectedCanvases = new Set(selected.map((glyph) => glyph.canvas));
+        return { host, canvasRects: selected,
+            canvasVersions: canvasVersions.filter((item) => selectedCanvases.has(item.canvas)),
+            key: location.href + '|' + getCurrentReviewChapterTitle() };
+    }
+
+    function findDOMReadingSentence(host, x, y) {
+        const glyphs = [];
+        const probe = document.createRange();
+        for (const entry of buildReviewTextIndex(host).nodes) {
+            probe.selectNodeContents(entry.node);
+            const block = probe.getBoundingClientRect();
+            // Enough context for wrapped fragments; avoid measuring a whole book on each click.
+            if (!block.width || !block.height || block.bottom < y - window.innerHeight
+                || block.top > y + window.innerHeight) continue;
+            let offset = 0;
+            for (const character of entry.node.nodeValue) {
+                const range = document.createRange();
+                range.setStart(entry.node, offset);
+                offset += character.length;
+                range.setEnd(entry.node, offset);
+                const rect = range.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) glyphs.push({ text: character, rect, range });
+            }
+        }
+        const selected = selectReadingGlyphs(glyphs, x, y);
+        return selected.length ? { host, domRanges: selected.map((glyph) => glyph.range),
+            markedText: selected.map((glyph) => glyph.text).join(''),
+            key: location.href + '|' + getCurrentReviewChapterTitle() } : null;
+    }
+
+    function selectReadingGlyphs(glyphs, x, y) {
+        // Both canvas draw order and DOM source order may be shuffled by the reader.
         glyphs.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
         const rows = [];
         for (const glyph of glyphs) {
@@ -682,55 +692,26 @@
         }
         let text = '';
         const entries = [];
+        let previousRow = null;
         for (const row of rows) {
             row.glyphs.sort((a, b) => a.rect.left - b.rect.left);
+            const height = Math.max(...row.glyphs.map((glyph) => glyph.rect.height));
+            if (previousRow && row.center - previousRow.center > height * 2.5) text += '\n';
             let previous = null;
             for (const glyph of row.glyphs) {
                 if (previous && glyph.text === previous.text && Math.abs(glyph.rect.left - previous.rect.left) < 1) continue;
-                // A large horizontal gap separates columns or distinct text blocks.
                 if (previous && glyph.rect.left - previous.rect.right > glyph.rect.height * 2) text += '\n';
                 entries.push({ glyph, start: text.length, end: text.length + glyph.text.length });
                 text += glyph.text;
                 previous = glyph;
             }
+            previousRow = row;
         }
-        const hit = entries.find(({ glyph: { rect: r } }) => x >= r.left && x <= r.right
+        const hit = entries.find(({ glyph: { rect: r } }) => x >= r.left && x < r.right
             && y >= r.top - 3 && y <= r.bottom + 3);
-        if (!hit) return null;
+        if (!hit) return [];
         const bounds = findReadingSentence(text, hit.start);
-        const canvasRects = entries.filter((item) => item.start < bounds.end && item.end > bounds.start).map((item) => item.glyph);
-        return { host, canvasRects, canvasVersions, key: location.href + '|' + getCurrentReviewChapterTitle() };
-    }
-
-    function findReadingCharacter(host, x, y) {
-        const containsPoint = (rect) => rect.width > 0 && rect.height > 0
-            && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-        const probe = document.createRange();
-        const hitCharacter = (node, offsets) => {
-            for (const offset of offsets) {
-                if (offset < 0 || offset >= node.length || /\s/.test(node.nodeValue[offset])) continue;
-                probe.setStart(node, offset);
-                probe.setEnd(node, offset + 1);
-                if (Array.from(probe.getClientRects()).some(containsPoint)) return { node, offset };
-            }
-            return null;
-        };
-        const caret = document.caretPositionFromPoint?.(x, y);
-        const fallback = !caret && document.caretRangeFromPoint?.(x, y);
-        const node = caret?.offsetNode || fallback?.startContainer;
-        const offset = caret?.offset ?? fallback?.startOffset;
-        if (node?.nodeType === Node.TEXT_NODE && host.contains(node)) {
-            const hit = hitCharacter(node, [offset, offset - 1]);
-            if (hit) return hit;
-        }
-        // Some reader text layers do not receive pointer events. Match their actual rectangles.
-        for (const entry of buildReviewTextIndex(host).nodes) {
-            probe.selectNodeContents(entry.node);
-            if (!Array.from(probe.getClientRects()).some(containsPoint)) continue;
-            const hit = hitCharacter(entry.node, Array.from({ length: entry.node.length }, (_, i) => i));
-            if (hit) return hit;
-        }
-        return null;
+        return entries.filter((item) => item.start < bounds.end && item.end > bounds.start).map((item) => item.glyph);
     }
 
     function findReadingSentence(text, offset) {
@@ -764,9 +745,10 @@
 
     function renderReadingMark() {
         if (!readingMark) return;
-        const { host, range, key, canvasRects, canvasVersions } = readingMark;
-        if (!host.isConnected || (range && (!host.contains(range.startContainer)
+        const { host, domRanges, markedText, key, canvasRects, canvasVersions } = readingMark;
+        if (!host.isConnected || (domRanges && domRanges.some((range) => !host.contains(range.startContainer)
             || !host.contains(range.endContainer) || range.collapsed))
+            || (domRanges && domRanges.map((range) => range.toString()).join('') !== markedText)
             || (canvasVersions && canvasVersions.some(({ canvas, version, width, height }) => !canvas.isConnected
                 || canvasReadingText.get(canvas)?.version !== version || canvas.width !== width || canvas.height !== height))
             || key !== location.href + '|' + getCurrentReviewChapterTitle()) {
@@ -780,7 +762,8 @@
             document.body.append(readingMarkNode);
         }
         const lines = [];
-        const rects = canvasRects ? canvasRects.map(canvasGlyphClientRect) : Array.from(range.getClientRects());
+        const rects = canvasRects ? canvasRects.map(canvasGlyphClientRect)
+            : domRanges.flatMap((range) => Array.from(range.getClientRects()));
         for (const rect of rects.filter((r) => r.width > 0 && r.height > 0)
             .sort((a, b) => a.top - b.top || a.left - b.left)) {
             const line = lines.find((item) => Math.abs(item.bottom - rect.bottom) < 3

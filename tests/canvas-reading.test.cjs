@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../kuanping.user.js'), 'utf8');
-const capture = source.slice(source.indexOf('    function installCanvasReadingCapture()'), source.indexOf('    function findReadingCharacter('));
+const capture = source.slice(source.indexOf('    function installCanvasReadingCapture()'), source.indexOf('    function findReadingSentence('));
 const sentence = source.slice(source.indexOf('    function findReadingSentence('), source.indexOf('    function renderReadingMark()'));
 class Context {
     constructor(canvas) { this.canvas = canvas; this.globalAlpha = 1; this.textAlign = 'left'; this.direction = 'ltr'; }
@@ -74,4 +74,31 @@ for (const [text, clicked, expected] of [
     const range = context.findReadingSentence(text, text.indexOf(clicked));
     assert.equal(text.slice(range.start, range.end), expected);
 }
-console.log('PASS: canvas capture, coordinates, wrapped sentences, columns, copying, clearing, reset and punctuation');
+// The reader also exposes deliberately shuffled, absolutely-positioned DOM spans.
+const shuffled = [
+    { text: '乙', rect: { left: 20, right: 30, top: 0, bottom: 20, height: 20 } },
+    { text: '，', rect: { left: 30, right: 40, top: 0, bottom: 20, height: 20 } },
+    { text: '甲', rect: { left: 10, right: 20, top: 0, bottom: 20, height: 20 } },
+    { text: '丙', rect: { left: 40, right: 50, top: 0, bottom: 20, height: 20 } },
+];
+assert.equal(context.selectReadingGlyphs(shuffled, 25, 10).map(g => g.text).join(''), '甲乙');
+assert.equal(context.selectReadingGlyphs(shuffled, 45, 10).map(g => g.text).join(''), '丙');
+assert.equal(context.selectReadingGlyphs(shuffled, 40, 10).map(g => g.text).join(''), '丙', 'shared edge does not select previous punctuation');
+
+const control = { setAttribute(name, value) { this[name] = value; } };
+const uiContext = { readingMarkEnabled: true,
+    document: { querySelectorAll: () => [control] },
+    setControlText: (button, value) => { button.text = value; }, clearReadingMark() {} };
+vm.createContext(uiContext);
+vm.runInContext(source.slice(source.indexOf('    function toggleReadingMark()'),
+    source.indexOf('    // The live reader uses canvas-only text.')), uiContext);
+uiContext.updateReadingMarkControls();
+assert.equal(control.text, '划线');
+assert.equal(control['aria-pressed'], 'true');
+uiContext.toggleReadingMark();
+assert.equal(control.text, '划线');
+assert.equal(control['aria-pressed'], 'false');
+uiContext.toggleReadingMark();
+assert.equal(control.text, '划线');
+assert.equal(control['aria-pressed'], 'true');
+console.log('PASS: canvas capture, geometry, shuffled text, punctuation, and fixed two-character toggle label');
