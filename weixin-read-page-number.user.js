@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         微信读书目录页码与阅读进度
 // @namespace    https://github.com/0CalEmotion
-// @version      1.4
-// @description  在微信读书网页版目录中显示章节页码，并在顶部显示当前阅读进度。
+// @version      1.6
+// @description  在微信读书网页版目录中显示章节页码，并在顶部显示本页非空白字数与阅读进度。
 // @author       0CalEmotion
 // @match        https://weread.qq.com/web/reader/*
-// @run-at       document-idle
+// @run-at       document-start
+// @grant        unsafeWindow
 // @grant        GM_addStyle
 // @license    MIT
 // ==/UserScript==
@@ -32,6 +33,8 @@
         chapterTurnIntent: null
     };
 
+    const canvasReadingText = new WeakMap();
+    installCanvasReadingCapture();
     bootstrap();
 
     function bootstrap() {
@@ -82,6 +85,10 @@
 
             .lv-top-progress-group-chapter {
                 grid-template-columns: 2em var(--lv-chapter-page-width, 5ch) 6ch;
+            }
+
+            .lv-top-progress-group-page {
+                grid-template-columns: 2em minmax(5ch, auto);
             }
 
             .lv-top-progress-group-book {
@@ -164,6 +171,7 @@
         runtime.observer.observe(document.documentElement, {
             subtree: true,
             childList: true,
+            characterData: true,
             attributes: true,
             attributeFilter: ['class', 'style']
         });
@@ -456,7 +464,10 @@
             return;
         }
 
+        current.pageWordCount = countCurrentPageWords();
+
         const signature = [
+            current.pageWordCount,
             current.currentPage,
             current.currentChapterPage,
             current.currentChapterPageCount,
@@ -810,6 +821,145 @@
         return null;
     }
 
+    function installCanvasReadingCapture() {
+        const page = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+        const transformRect = (matrix, x, y, width, height) => {
+            const points = [[x, y], [x + width, y], [x, y + height], [x + width, y + height]]
+                .map(([px, py]) => ({ x: matrix.a * px + matrix.c * py + matrix.e,
+                    y: matrix.b * px + matrix.d * py + matrix.f }));
+            return { left: Math.min(...points.map((p) => p.x)), right: Math.max(...points.map((p) => p.x)),
+                top: Math.min(...points.map((p) => p.y)), bottom: Math.max(...points.map((p) => p.y)) };
+        };
+        const stateFor = (canvas) => {
+            let state = canvasReadingText.get(canvas);
+            if (!state || state.width !== canvas.width || state.height !== canvas.height) {
+                state = { width: canvas.width, height: canvas.height, glyphs: [], version: (state?.version || 0) + 1 };
+                canvasReadingText.set(canvas, state);
+            }
+            return state;
+        };
+        const prototypes = new Set([page.CanvasRenderingContext2D?.prototype, page.OffscreenCanvasRenderingContext2D?.prototype]);
+        for (const proto of prototypes) {
+            if (!proto) continue;
+            const wrap = (name, capture) => {
+                const original = proto[name];
+                if (!original) return;
+                proto[name] = function (...args) {
+                    const result = Reflect.apply(original, this, args);
+                    // A capture failure must never break the site's renderer.
+                    try { capture(this, args); } catch (error) { /* Unsupported drawing operation. */ }
+                    return result;
+                };
+            };
+            wrap('fillText', (ctx, [value, x, y, maxWidth]) => {
+                if (!ctx.globalAlpha) return;
+                const text = String(value);
+                if (!text.trim()) return;
+                const metrics = ctx.measureText(text);
+                const scale = maxWidth > 0 && metrics.width > maxWidth ? maxWidth / metrics.width : 1;
+                const align = ctx.textAlign;
+                const rtl = ctx.direction === 'rtl';
+                const shift = align === 'center' ? metrics.width / 2
+                    : align === 'right' || (align === 'end' && !rtl) || (align === 'start' && rtl) ? metrics.width : 0;
+                const matrix = ctx.getTransform();
+                const state = stateFor(ctx.canvas);
+                let prefix = '';
+                for (const character of text) {
+                    const left = ctx.measureText(prefix).width;
+                    const glyph = ctx.measureText(character);
+                    const width = glyph.width * scale;
+                    const ascent = metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent;
+                    const descent = metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent;
+                    const box = transformRect(matrix, Number(x) + (left - shift) * scale,
+                        Number(y) - ascent, width, Math.max(1, ascent + descent));
+                    state.glyphs.push({ text: character, ...box });
+                    prefix += character;
+                }
+                state.version += 1;
+            });
+            wrap('clearRect', (ctx, [x, y, width, height]) => {
+                const state = stateFor(ctx.canvas);
+                const box = transformRect(ctx.getTransform(), x, y, width, height);
+                state.glyphs = state.glyphs.filter((g) => g.right <= box.left || g.left >= box.right
+                    || g.bottom <= box.top || g.top >= box.bottom);
+                state.version += 1;
+            });
+            wrap('reset', (ctx) => {
+                const state = stateFor(ctx.canvas);
+                state.glyphs = [];
+                state.version += 1;
+            });
+            // Preserve glyph positions when the renderer copies a temporary canvas to the visible one.
+            wrap('drawImage', (ctx, args) => {
+                const source = args[0];
+                const input = canvasReadingText.get(source);
+                if (!input?.glyphs.length || input.width !== source.width || input.height !== source.height) return;
+                let sx = 0, sy = 0, sw = source.width, sh = source.height;
+                let dx = args[1], dy = args[2], dw = sw, dh = sh;
+                if (args.length === 5) { dw = args[3]; dh = args[4]; }
+                if (args.length === 9) [, sx, sy, sw, sh, dx, dy, dw, dh] = args;
+                if (!sw || !sh) return;
+                const state = stateFor(ctx.canvas);
+                const matrix = ctx.getTransform();
+                const copies = input.glyphs.filter((g) => g.left >= sx && g.right <= sx + sw
+                    && g.top >= sy && g.bottom <= sy + sh).map((g) => ({ text: g.text,
+                    ...transformRect(matrix, dx + (g.left - sx) * dw / sw, dy + (g.top - sy) * dh / sh,
+                        (g.right - g.left) * dw / sw, (g.bottom - g.top) * dh / sh) }));
+                state.glyphs.push(...copies);
+                state.version += 1;
+            });
+        }
+    }
+
+    function countNonWhitespace(text) {
+        return Array.from(String(text || '').replace(/[\s\u200B-\u200D\u2060\uFEFF]/gu, '')).length;
+    }
+
+    function countCurrentPageWords() {
+        const chapter = document.querySelector('.readerChapterContent');
+        if (!chapter) return null;
+        const canvases = Array.from(chapter.querySelectorAll('.wr_canvasContainer canvas'))
+            .filter((canvas) => {
+                const rect = canvas.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            });
+        if (canvases.length) {
+            let count = 0;
+            for (const canvas of canvases) {
+                const state = canvasReadingText.get(canvas);
+                // Never substitute unrelated DOM labels for missing canvas text.
+                if (!state || state.width !== canvas.width || state.height !== canvas.height) return null;
+                const seen = new Set();
+                for (const glyph of state.glyphs) {
+                    if (glyph.right <= 0 || glyph.left >= canvas.width
+                        || glyph.bottom <= 0 || glyph.top >= canvas.height) continue;
+                    const key = [glyph.text, ...['left', 'top', 'right', 'bottom'].map((axis) =>
+                        Math.round(glyph[axis] * 100) / 100)].join('|');
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    count += countNonWhitespace(glyph.text);
+                }
+            }
+            return count;
+        }
+
+        const root = chapter.querySelector('.renderTargetContent') || chapter;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        let count = 0;
+        let node;
+        while ((node = walker.nextNode())) {
+            if (node.parentElement?.closest('script, style, noscript, button, canvas, svg, textarea, .wr_dialog, [hidden], .lv-page-meta, .lv-top-progress')) continue;
+            let hidden = false;
+            for (let element = node.parentElement; element; element = element.parentElement) {
+                const style = window.getComputedStyle(element);
+                if (style.display === 'none' || style.visibility === 'hidden') { hidden = true; break; }
+                if (element === root) break;
+            }
+            if (!hidden) count += countNonWhitespace(node.nodeValue);
+        }
+        return count;
+    }
+
     function renderTopProgress(current) {
         const topBarInner = document.querySelector('.readerTopBar_inner');
         const nav = document.querySelector('.readerTopBar_right');
@@ -829,6 +979,10 @@
         node.style.setProperty('--lv-chapter-page-width', `${chapterPageDigits * 2 + 1}ch`);
         node.style.setProperty('--lv-book-page-width', `${bookPageDigits * 2 + 1}ch`);
         node.innerHTML = [
+            '<span class="lv-top-progress-group lv-top-progress-group-page" title="当前加载整页正文的非空白字符数（含标点），不随滚动改变">',
+            '<span class="lv-top-progress-cell">本页</span>',
+            `<span class="lv-top-progress-cell">${current.pageWordCount == null ? '—' : current.pageWordCount}字</span>`,
+            '</span>',
             '<span class="lv-top-progress-group lv-top-progress-group-chapter">',
             '<span class="lv-top-progress-cell">本章</span>',
             `<span class="lv-top-progress-cell">${current.currentChapterPage}/${current.currentChapterPageCount}</span>`,
